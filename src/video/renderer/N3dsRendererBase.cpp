@@ -19,6 +19,7 @@
 
 #include "N3dsRenderer.hpp"
 #include "vshader_shbin.h"
+#include "../../potato/potato_profile.h"
 
 #include <3ds.h>
 #include <cstdlib>
@@ -30,14 +31,24 @@
 N3dsRendererBase::N3dsRendererBase(gfxScreen_t screen_in, int surface_width_in,
                                    int surface_height_in, int image_width_in,
                                    int image_height_in, int pixel_size,
+                                   int source_stride_px_in,
+                                   int source_buffer_height_in,
                                    bool debug_in)
     : screen(screen_in), surface_width(surface_width_in),
       surface_height(surface_height_in), image_width(image_width_in),
-      image_height(image_height_in), debug(debug_in), px_size(pixel_size) {
+      image_height(image_height_in),
+      texture_width(n3ds_calc_texture_dim(image_width_in, MOON_CTR_VIDEO_TEX_W)),
+      texture_height(
+          n3ds_calc_texture_dim(image_height_in, MOON_CTR_VIDEO_TEX_H)),
+      source_stride_px(source_stride_px_in > 0 ? source_stride_px_in
+                                               : texture_width),
+      source_buffer_height(source_buffer_height_in > 0
+                               ? source_buffer_height_in
+                               : texture_height),
+      px_size(pixel_size), debug(debug_in) {
     cmdlist = (u32 *)linearAlloc(CMDLIST_SZ * 4);
     vramFb = vramAlloc(surface_width * surface_height * px_size);
-    // Needs to be able to hold an 800x480
-    vramTex = vramAlloc(MOON_CTR_VIDEO_TEX_W * MOON_CTR_VIDEO_TEX_H * px_size);
+    vramTex = vramAlloc(texture_width * texture_height * px_size);
 }
 
 N3dsRendererBase::~N3dsRendererBase() {
@@ -130,9 +141,9 @@ void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
     // Tile the source image into the scratch buffer.
     GX_DisplayTransfer(
         (u32 *)source,
-        GX_BUFFER_DIM(MOON_CTR_VIDEO_TEX_W, MOON_CTR_VIDEO_TEX_H),
+        GX_BUFFER_DIM(source_stride_px, source_buffer_height),
         (u32 *)vramTex,
-        GX_BUFFER_DIM(MOON_CTR_VIDEO_TEX_W, MOON_CTR_VIDEO_TEX_H),
+        GX_BUFFER_DIM(texture_width, texture_height),
         GX_TRANSFER_FLIP_VERT(1) | GX_TRANSFER_OUT_TILED(1) |
             GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |
             GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565));
@@ -183,12 +194,23 @@ void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
     C(GPUREG_LOGIC_OP, 3);
     C(GPUREG_COLOR_OPERATION, 0x00E40000);
 
+    u32 texture_filter = GPU_NEAREST | (GPU_LINEAR << 1);
+    if (g_potato.is_potato) {
+        if (g_potato.experimental_stable_stream) {
+            texture_filter = GPU_NEAREST | (GPU_NEAREST << 1);
+        } else if (g_potato.render_linear_filter) {
+            texture_filter = GPU_LINEAR | (GPU_LINEAR << 1);
+        }
+        if (g_potato.dynamic_ultra_active) {
+            texture_filter = GPU_NEAREST | (GPU_NEAREST << 1);
+        }
+    }
+
     // Texturing
     C(GPUREG_TEXUNIT0_TYPE, GPU_RGB565);
-    C(GPUREG_TEXUNIT0_DIM, MOON_CTR_VIDEO_TEX_H | (MOON_CTR_VIDEO_TEX_W << 16));
+    C(GPUREG_TEXUNIT0_DIM, texture_height | (texture_width << 16));
     C(GPUREG_TEXUNIT0_ADDR1, osConvertVirtToPhys(vramTex) >> 3);
-    C(GPUREG_TEXUNIT0_PARAM,
-      GPU_NEAREST | (GPU_LINEAR << 1)); // Linear min and mag filter
+    C(GPUREG_TEXUNIT0_PARAM, texture_filter);
 
     // Shading
     // GPUCMD_AddMaskedWrite(GPUREG_SH_OUTATTR_CLOCK, 0x2, 1 << 8); // No Z, Yes
@@ -285,23 +307,35 @@ void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
                                     3);                                        \
     }
 
-    float sw = image_width / ((float)MOON_CTR_VIDEO_TEX_W);
-    float sh = image_height / ((float)MOON_CTR_VIDEO_TEX_H);
+    float su_min = 0.0f;
+    float su_max = image_width / ((float)texture_width);
+    if (screen == GFX_TOP && g_potato.is_potato &&
+        g_potato.render_crop_to_fit && !g_potato.dynamic_ultra_active) {
+        const float source_aspect = image_width / (float)image_height;
+        const float target_aspect = surface_width / (float)surface_height;
+        if (source_aspect > target_aspect) {
+            const float target_width = image_height * target_aspect;
+            const float crop_x = (image_width - target_width) * 0.5f;
+            su_min = crop_x / texture_width;
+            su_max = (crop_x + target_width) / texture_width;
+        }
+    }
+    float sh = image_height / ((float)texture_height);
 
     // float hw = 2.0f / surface_height;
     float hh = 2.0f / surface_width;
 
     ATTR(1.0, -1.0, 0.0, 0.0); // TR
-    ATTR(sw, -hh, 0.0, 0.0);
+    ATTR(su_max, -hh, 0.0, 0.0);
 
     ATTR(-1.0, -1.0, 0.0, 0.0); // TL
-    ATTR(sw, sh, 0.0, 0.0);
+    ATTR(su_max, sh, 0.0, 0.0);
 
     ATTR(1.0, 1.0, 0.0, 0.0); // BR
-    ATTR(0.0, -hh, 0.0, 0.0);
+    ATTR(su_min, -hh, 0.0, 0.0);
 
     ATTR(-1.0, 1.0, 0.0, 0.0); // BL
-    ATTR(0.0, sh, 0.0, 0.0);
+    ATTR(su_min, sh, 0.0, 0.0);
 
     // End Geometry Pipeline
     GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 1);

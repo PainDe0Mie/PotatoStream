@@ -25,8 +25,8 @@
 #include <cstring>
 #include <fstream>
 #include <getopt.h>
+#include <unistd.h>
 
-#define MOONLIGHT_PATH "/moonlight"
 #define USER_PATHS "."
 #define DEFAULT_CONFIG_DIR "/.config"
 #define DEFAULT_CACHE_DIR "/.cache"
@@ -53,6 +53,9 @@ static struct option long_options[] = {
     {"swapfacebuttons", required_argument, NULL, 'A'},
     {"swaptriggersandshoulders", required_argument, NULL, 'B'},
     {"usetriggersformouse", required_argument, NULL, 'C'},
+    {"better_screen", required_argument, NULL, 'D'},
+    {"stable_stream", required_argument, NULL, 'E'},
+    {"ultra_potato", required_argument, NULL, 'F'},
     {0, 0, 0, 0},
 };
 
@@ -115,6 +118,18 @@ void parse_argument(int c, char *value, PCONFIGURATION config) {
         config->use_triggers_for_mouse =
             ((value != NULL) && (strcmp(value, "true") == 0));
         break;
+    case 'D':
+        config->experimental_better_screen =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'E':
+        config->experimental_stable_stream =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'F':
+        config->experimental_ultra_potato =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
     case 1:
         if (config->action == NULL)
             config->action = value;
@@ -128,8 +143,12 @@ void parse_argument(int c, char *value, PCONFIGURATION config) {
     }
 }
 
-bool config_file_parse(PCONFIGURATION config) {
-    std::ifstream config_file(MOONLIGHT_3DS_PATH "/moonlight.conf");
+static bool config_file_parse_path(const char *filename, PCONFIGURATION config) {
+    std::ifstream config_file(filename);
+    if (!config_file.good()) {
+        return false;
+    }
+
     std::string line;
     while (std::getline(config_file, line)) {
         char *key = NULL, *value = NULL;
@@ -151,8 +170,18 @@ bool config_file_parse(PCONFIGURATION config) {
     return true;
 }
 
+bool config_file_parse(PCONFIGURATION config) {
+    if (config_file_parse_path(STREAMPOTATO_CONFIG_PATH, config)) {
+        return true;
+    }
+    return config_file_parse_path(LEGACY_MOONLIGHT_CONFIG_PATH, config);
+}
+
 void config_save(char *filename, PCONFIGURATION config) {
     FILE *fd = fopen(filename, "w");
+    if (fd == NULL && strcmp(filename, STREAMPOTATO_CONFIG_PATH) == 0) {
+        fd = fopen(LEGACY_MOONLIGHT_CONFIG_PATH, "w");
+    }
     if (fd == NULL) {
         fprintf(stderr, "Can't open configuration file: %s\n", filename);
         exit(EXIT_FAILURE);
@@ -174,6 +203,9 @@ void config_save(char *filename, PCONFIGURATION config) {
     write_config_bool(fd, "usetriggersformouse",
                       config->use_triggers_for_mouse);
     write_config_bool(fd, "motion_controls", config->motion_controls);
+    write_config_bool(fd, "better_screen", config->experimental_better_screen);
+    write_config_bool(fd, "stable_stream", config->experimental_stable_stream);
+    write_config_bool(fd, "ultra_potato", config->experimental_ultra_potato);
 
     if (strcmp(config->app, "Steam") != 0)
         write_config_string(fd, "app", config->app);
@@ -203,7 +235,11 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->viewonly = false;
     config->port = 47989;
 
-    strcpy(config->key_dir, MOONLIGHT_3DS_PATH "/keys");
+    if (access(STREAMPOTATO_3DS_PATH, F_OK) == 0) {
+        strcpy(config->key_dir, STREAMPOTATO_3DS_PATH "/keys");
+    } else {
+        strcpy(config->key_dir, LEGACY_MOONLIGHT_3DS_PATH "/keys");
+    }
 
     config->stream.width = 800;
     config->stream.height = 480;
@@ -214,6 +250,9 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->swap_face_buttons = false;
     config->swap_triggers_and_shoulders = false;
     config->use_triggers_for_mouse = false;
+    config->experimental_better_screen = false;
+    config->experimental_stable_stream = false;
+    config->experimental_ultra_potato = false;
 
     config_file_parse(config);
 

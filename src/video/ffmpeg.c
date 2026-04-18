@@ -105,6 +105,14 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     // Allow display of corrupt frames and frames missing references
     decoder_ctx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
     decoder_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
+    if (perf_lvl & FAST_DECODE) {
+      decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+      decoder_ctx->skip_loop_filter = AVDISCARD_NONREF;
+    }
+    if (perf_lvl & VERY_FAST_DECODE) {
+      decoder_ctx->skip_idct = AVDISCARD_NONREF;
+      decoder_ctx->skip_frame = AVDISCARD_NONREF;
+    }
 
     // Report decoding errors to allow us to request a key frame
     decoder_ctx->err_recognition = AV_EF_EXPLODE;

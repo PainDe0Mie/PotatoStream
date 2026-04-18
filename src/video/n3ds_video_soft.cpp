@@ -54,8 +54,8 @@ SoftVideoDecoder::SoftVideoDecoder(int videoFormat, int width, int height,
     y2r_parameters.output_format = OUTPUT_RGB_16_565;
     y2r_parameters.rotation = ROTATION_NONE;
     y2r_parameters.block_alignment = BLOCK_LINE;
-    y2r_parameters.input_line_width = width;
-    y2r_parameters.input_lines = height;
+    y2r_parameters.input_line_width = image_width;
+    y2r_parameters.input_lines = image_height;
     y2r_parameters.standard_coefficient = COEFFICIENT_ITU_R_BT_709_SCALING;
     y2r_parameters.alpha = 0xFF;
     int status = Y2RU_SetConversionParams(&y2r_parameters);
@@ -64,8 +64,8 @@ SoftVideoDecoder::SoftVideoDecoder(int videoFormat, int width, int height,
         throw std::runtime_error("Failed to set Y2RU params\n");
     }
 
-    rgb_img_buffer = (u8 *)linearAlloc(MOON_CTR_VIDEO_TEX_W *
-                                       MOON_CTR_VIDEO_TEX_H * pixel_size);
+    rgb_img_buffer =
+        (u8 *)linearAlloc(texture_width * texture_height * pixel_size);
     if (!rgb_img_buffer) {
         fprintf(stderr, "Out of memory!\n");
         throw std::runtime_error("Out of memory!\n");
@@ -104,8 +104,8 @@ inline int SoftVideoDecoder::_write_yuv_to_framebuffer(const u8 **source,
     }
 
     status = Y2RU_SetReceiving(
-        rgb_img_buffer, MOON_CTR_VIDEO_TEX_W * MOON_CTR_VIDEO_TEX_H * px_size,
-        width * px_size, (MOON_CTR_VIDEO_TEX_W - width) * px_size);
+        rgb_img_buffer, texture_width * texture_height * px_size,
+        width * px_size, (texture_width - width) * px_size);
     if (status) {
         fprintf(stderr, "Y2RU_SetReceiving failed\n");
         goto y2ru_failed;
@@ -146,13 +146,18 @@ int SoftVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
                     decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
 
     while (entry != NULL) {
-        memcpy(ffmpeg_buffer + length, entry->data, entry->length);
+        memcpy((u8 *)ffmpeg_buffer + length, entry->data, entry->length);
         length += entry->length;
         entry = entry->next;
     }
-    ffmpeg_decode((unsigned char *)ffmpeg_buffer, length);
+    if (ffmpeg_decode((unsigned char *)ffmpeg_buffer, length) < 0) {
+        return DR_OK;
+    }
 
     AVFrame *frame = ffmpeg_get_frame(false);
+    if (frame == nullptr) {
+        return DR_OK;
+    }
     int status = _write_yuv_to_framebuffer(
         (const u8 **)frame->data, image_width, image_height, pixel_size);
 

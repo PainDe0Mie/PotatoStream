@@ -70,8 +70,8 @@ MvdDecoder::MvdDecoder(int videoFormat, int width, int height, int redrawRate,
         throw std::runtime_error("mvdstdInit failed");
     }
 
-    rgb_img_buffer = (u8 *)linearAlloc(MOON_CTR_VIDEO_TEX_W *
-                                       MOON_CTR_VIDEO_TEX_H * pixel_size);
+    rgb_img_buffer =
+        (u8 *)linearAlloc(texture_width * texture_height * pixel_size);
     if (!rgb_img_buffer) {
         fprintf(stderr, "Out of memory!\n");
         throw std::runtime_error("Out of memory");
@@ -90,8 +90,8 @@ MvdDecoder::MvdDecoder(int videoFormat, int width, int height, int redrawRate,
 
     // Place within the 1024x512 buffer
     mvdstd_config.flag_x104 = 1;
-    mvdstd_config.output_width_override = MOON_CTR_VIDEO_TEX_W;
-    mvdstd_config.output_height_override = MOON_CTR_VIDEO_TEX_H;
+    mvdstd_config.output_width_override = texture_width;
+    mvdstd_config.output_height_override = texture_height;
     MVDSTD_SetConfig(&mvdstd_config);
 }
 
@@ -136,7 +136,7 @@ int MvdDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
     }
 
     while (entry != NULL) {
-        memcpy(nal_unit_buffer + length, entry->data, entry->length);
+        memcpy((u8 *)nal_unit_buffer + length, entry->data, entry->length);
         length += entry->length;
         entry = entry->next;
     }

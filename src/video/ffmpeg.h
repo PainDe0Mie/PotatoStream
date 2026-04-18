@@ -26,6 +26,8 @@
 // Uses hardware acceleration
 #define VDPAU_ACCELERATION 0x40
 #define VAAPI_ACCELERATION 0x80
+#define FAST_DECODE 0x100
+#define VERY_FAST_DECODE 0x200
 
 #ifdef __cplusplus
 extern "C" {

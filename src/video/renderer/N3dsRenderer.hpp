@@ -31,6 +31,14 @@
 #define MOON_CTR_VIDEO_TEX_H_OFFSET 32
 #define CMDLIST_SZ 0x800
 
+static inline int n3ds_calc_texture_dim(int value, int max_value) {
+    int dim = 8;
+    while (dim < value && dim < max_value) {
+        dim <<= 1;
+    }
+    return dim > max_value ? max_value : dim;
+}
+
 class IN3dsRenderer {
   public:
     virtual ~IN3dsRenderer() = default;
@@ -43,8 +51,13 @@ class N3dsRendererBase {
     N3dsRendererBase(gfxScreen_t screen_in, int surface_width_in,
                      int surface_height_in, int image_width_in,
                      int image_height_in, int pixel_size,
+                     int source_stride_px_in = 0,
+                     int source_buffer_height_in = 0,
                      bool debug_in = false);
     virtual ~N3dsRendererBase();
+    int get_texture_width() const { return texture_width; }
+    int get_texture_height() const { return texture_height; }
+    int get_texture_line_stride() const { return texture_width * px_size; }
 
   protected:
     inline void draw_perf_counters();
@@ -64,6 +77,10 @@ class N3dsRendererBase {
     int surface_height;
     int image_width;
     int image_height;
+    int texture_width;
+    int texture_height;
+    int source_stride_px;
+    int source_buffer_height;
     int px_size;
     bool debug;
     u32 *cmdlist = NULL;
@@ -74,7 +91,9 @@ class N3dsRendererBase {
 class N3dsRendererTop : public N3dsRendererBase {
   public:
     N3dsRendererTop(int dest_width, int dest_height, int src_width,
-                    int src_height, int px_size, bool debug_in = false);
+                    int src_height, int px_size, int source_stride_px_in = 0,
+                    int source_buffer_height_in = 0,
+                    bool debug_in = false);
     ~N3dsRendererTop() = default;
     void write_px_to_framebuffer(uint8_t *source);
     void set_perf_decode_ticks(u64 ticks);
@@ -83,6 +102,8 @@ class N3dsRendererTop : public N3dsRendererBase {
 class N3dsRendererBottom : public N3dsRendererBase {
   public:
     N3dsRendererBottom(int src_width, int src_height, int px_size,
+                       int source_stride_px_in = 0,
+                       int source_buffer_height_in = 0,
                        bool debug_in = false);
     ~N3dsRendererBottom() = default;
     void write_px_to_framebuffer(uint8_t *source);

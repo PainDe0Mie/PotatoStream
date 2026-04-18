@@ -27,9 +27,12 @@
 #include <unistd.h>
 
 N3dsRendererTop::N3dsRendererTop(int dest_width, int dest_height, int src_width,
-                                 int src_height, int px_size, bool debug_in)
+                                 int src_height, int px_size,
+                                 int source_stride_px_in,
+                                 int source_buffer_height_in, bool debug_in)
     : N3dsRendererBase(GFX_TOP, dest_width, dest_height, src_width, src_height,
-                       px_size, debug_in) {}
+                       px_size, source_stride_px_in,
+                       source_buffer_height_in, debug_in) {}
 
 void N3dsRendererTop::write_px_to_framebuffer(uint8_t *source) {
     // TODO: Add logic for stretching 400px images to fit 2 400px screen buffers

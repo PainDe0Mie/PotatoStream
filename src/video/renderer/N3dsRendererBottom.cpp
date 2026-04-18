@@ -26,9 +26,12 @@
 #include <unistd.h>
 
 N3dsRendererBottom::N3dsRendererBottom(int src_width, int src_height,
-                                       int px_size, bool debug_in)
+                                       int px_size, int source_stride_px_in,
+                                       int source_buffer_height_in,
+                                       bool debug_in)
     : N3dsRendererBase(GFX_BOTTOM, GSP_SCREEN_HEIGHT_BOTTOM, GSP_SCREEN_WIDTH,
-                       src_width, src_height, px_size, debug_in) {}
+                       src_width, src_height, px_size, source_stride_px_in,
+                       source_buffer_height_in, debug_in) {}
 
 void N3dsRendererBottom::write_px_to_framebuffer(uint8_t *source) {
     write_px_to_framebuffer_gpu(source);

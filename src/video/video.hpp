@@ -56,7 +56,8 @@ class VideoDecoderBase : public ISubscriber {
     void _accept_keyboard_state_changed(KeyboardStateChangedMsg *msg);
 
   protected:
-    int image_width, image_height, surface_width, surface_height, pixel_size;
+    int image_width, image_height, texture_width, texture_height,
+        surface_width, surface_height, pixel_size;
     std::unique_ptr<IN3dsRenderer> renderer = nullptr;
     ThreadLock renderer_lock;
 };
@@ -106,3 +107,4 @@ class MvdDecoder : public VideoDecoderBase {
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_n3ds;
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_n3ds_mvd;
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_mock;
+extern DECODER_RENDERER_CALLBACKS decoder_callbacks_potato;

@@ -20,6 +20,8 @@
 #include "audio/audio.h"
 #include "config.hpp"
 #include "input/n3ds_input.hpp"
+#include "menu_ui.hpp"
+#include "potato/potato_profile.h"
 #include "system/dispatcher.hpp"
 #include "system/n3ds_connection.hpp"
 #include "system/pair_record.hpp"
@@ -33,6 +35,7 @@
 #include <http.h>
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <exception>
 #include <malloc.h>
 #include <netdb.h>
@@ -55,16 +58,363 @@
 #define MAX_INPUT_CHAR 60
 
 static u32 *SOC_buffer = NULL;
+static bool g_ac_initialized = false;
+static bool g_gfx_initialized = false;
+static bool g_apt_initialized = false;
+static bool g_soc_initialized = false;
+static bool g_ndmu_initialized = false;
+static bool g_ndmu_exclusive = false;
+static bool g_ndmu_locked = false;
+
+static int init_server(CONFIGURATION *config, SERVER_DATA *server);
+static std::string build_profile_status(PCONFIGURATION config = nullptr);
+static void wait_for_all_buttons_release();
+
+struct AsyncTask {
+    int (*fn)(void *);
+    void *context;
+    std::atomic<bool> done = false;
+    int result = -1;
+};
+
+struct InitServerTaskContext {
+    CONFIGURATION *config;
+    SERVER_DATA *server;
+};
+
+struct AppListTaskContext {
+    PSERVER_DATA server;
+    PAPP_LIST list = NULL;
+};
+
+struct PairTaskContext {
+    PSERVER_DATA server;
+    char *pin;
+};
+
+struct ServerTaskContext {
+    PSERVER_DATA server;
+};
+
+struct StartAppTaskContext {
+    PSERVER_DATA server;
+    PSTREAM_CONFIGURATION stream;
+    int appId;
+    bool sops;
+    bool localaudio;
+    int gamepad_mask;
+};
+
+static void async_task_entry(void *arg) {
+    AsyncTask *task = static_cast<AsyncTask *>(arg);
+    task->result = task->fn(task->context);
+    task->done.store(true);
+}
+
+static int init_server_task(void *ctx) {
+    auto *task = static_cast<InitServerTaskContext *>(ctx);
+    return init_server(task->config, task->server);
+}
+
+static int app_list_task(void *ctx) {
+    auto *task = static_cast<AppListTaskContext *>(ctx);
+    return gs_applist(task->server, &task->list);
+}
+
+static int pair_task(void *ctx) {
+    auto *task = static_cast<PairTaskContext *>(ctx);
+    return gs_pair(task->server, task->pin);
+}
+
+static int unpair_task(void *ctx) {
+    auto *task = static_cast<ServerTaskContext *>(ctx);
+    return gs_unpair(task->server);
+}
+
+static int quit_app_task(void *ctx) {
+    auto *task = static_cast<ServerTaskContext *>(ctx);
+    return gs_quit_app(task->server);
+}
+
+static int start_app_task(void *ctx) {
+    auto *task = static_cast<StartAppTaskContext *>(ctx);
+    return gs_start_app(task->server, task->stream, task->appId, task->sops,
+                        task->localaudio, task->gamepad_mask);
+}
+
+static int run_loading_task(const std::string &title, const std::string &body,
+                            const std::string &status,
+                            const std::string &footer_hint, int (*fn)(void *),
+                            void *context,
+                            const std::string &pin = std::string()) {
+    if (!menu_ui_is_active()) {
+        return fn(context);
+    }
+
+    AsyncTask task = {
+        .fn = fn,
+        .context = context,
+    };
+
+    s32 priority = 0x30;
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    Thread worker =
+        threadCreate(async_task_entry, &task, 0x20000, priority, -1, false);
+    if (worker == nullptr) {
+        return fn(context);
+    }
+
+    int frame = 0;
+    while (aptMainLoop() && !task.done.load()) {
+        if (pin.empty()) {
+            menu_ui_draw_loading(title, body, status, footer_hint, frame);
+        } else {
+            menu_ui_draw_pairing(title, pin, body, status, footer_hint, frame);
+        }
+        gspWaitForVBlank();
+        frame++;
+    }
+
+    threadJoin(worker, ~0ULL);
+    threadFree(worker);
+    return task.result;
+}
+
+static std::string prompt_for_text_input(const std::string &hint_text,
+                                         const std::string &initial_text,
+                                         SwkbdType keyboard_type,
+                                         int max_length, int input_length) {
+    wait_for_all_buttons_release();
+
+    const bool had_menu_ui = menu_ui_is_active();
+    if (had_menu_ui) {
+        menu_ui_shutdown();
+    }
+
+    std::vector<char> buffer(max_length + 1, '\0');
+    SwkbdState swkbd;
+    swkbdInit(&swkbd, keyboard_type,
+              keyboard_type == SWKBD_TYPE_NUMPAD ? 1 : 3, input_length);
+    if (!hint_text.empty()) {
+        swkbdSetHintText(&swkbd, hint_text.c_str());
+    }
+    if (!initial_text.empty()) {
+        swkbdSetInitialText(&swkbd, initial_text.c_str());
+    }
+    SwkbdButton button =
+        swkbdInputText(&swkbd, buffer.data(), static_cast<int>(buffer.size()));
+
+    if (had_menu_ui) {
+        menu_ui_init();
+    }
+
+    if (button != SWKBD_BUTTON_RIGHT) {
+        return "";
+    }
+
+    std::string text = buffer.data();
+    trim(text);
+    return text;
+}
+
+static void draw_stream_wait_screen(PCONFIGURATION config,
+                                    const std::string &headline,
+                                    const std::string &detail) {
+    consoleSelect(&DebugTouchHandler::topScreen);
+    consoleClear();
+    printf("STREAM POTATO\n\n");
+    printf("%s\n\n", headline.c_str());
+    printf("%s\n\n", detail.c_str());
+    printf("Requested stream:\n%dx%d @ %d fps\n",
+           config->stream.width, config->stream.height, config->stream.fps);
+
+    consoleSelect(&DebugTouchHandler::bottomScreen);
+    consoleClear();
+    printf("Status\n\n");
+    printf("%s\n\n", build_profile_status(config).c_str());
+    if (g_potato.is_potato) {
+        printf("If the PC desktop still looks tiny,\n");
+        printf("the host is likely staying in 1080p.\n");
+        printf("Use a game/app session or raise PC UI scaling.\n");
+    }
+
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+    gspWaitForVBlank();
+}
+
+static std::string build_profile_status(PCONFIGURATION config) {
+    char buffer[256];
+    if (g_potato.is_potato) {
+        bool better_screen =
+            config != nullptr ? config->experimental_better_screen
+                              : g_potato.experimental_better_screen;
+        bool stable_stream =
+            config != nullptr ? config->experimental_stable_stream
+                              : g_potato.experimental_stable_stream;
+        bool ultra_potato =
+            config != nullptr ? config->experimental_ultra_potato
+                              : g_potato.experimental_ultra_potato;
+        int width = ultra_potato ? POTATO_ULTRA_WIDTH
+                                 : (better_screen ? POTATO_BETTER_WIDTH
+                                                  : POTATO_WIDTH);
+        int height = ultra_potato ? POTATO_ULTRA_HEIGHT
+                                  : (better_screen ? POTATO_BETTER_HEIGHT
+                                                   : POTATO_HEIGHT);
+        int fps = ultra_potato ? POTATO_ULTRA_FPS
+                               : stable_stream ? POTATO_STABLE_FPS
+                                : (better_screen ? POTATO_BETTER_FPS
+                                                 : POTATO_FPS);
+        int bitrate = ultra_potato
+                          ? POTATO_ULTRA_BITRATE_KBPS
+                          : stable_stream
+                          ? (better_screen ? POTATO_STABLE_BETTER_BITRATE_KBPS
+                                           : POTATO_STABLE_BITRATE_KBPS)
+                          : (better_screen ? POTATO_BETTER_BITRATE_KBPS
+                                           : POTATO_BITRATE_KBPS);
+        int packet_size = ultra_potato ? POTATO_ULTRA_PACKET_SIZE
+                           : stable_stream ? POTATO_STABLE_PACKET_SIZE
+                                           : POTATO_PACKET_SIZE;
+        const bool host_audio =
+            config != nullptr ? config->localaudio : g_potato.host_audio;
+        char experimental[128];
+        snprintf(experimental, sizeof(experimental), "%s%s%s%s%s",
+                 ultra_potato ? "ultra potato auto" : "",
+                 ultra_potato && (better_screen || stable_stream) ? " + " : "",
+                 better_screen ? "better screen" : "",
+                 (better_screen && stable_stream && !ultra_potato) ? " + " : "",
+                 stable_stream ? "stable stream" : "");
+        snprintf(buffer, sizeof(buffer), "%s: %dx%d | %dfps | %dkbps | packet %d | audio %s%s%s",
+                 g_potato.dynamic_ultra_active ? "EMERGENCY MODE" : "SAFE MODE active",
+                 width, height, fps, bitrate, packet_size,
+                 host_audio ? "host" : "3DS",
+                 experimental[0] != '\0' ? " | " : "",
+                 experimental);
+        return buffer;
+    }
+
+    if (config == nullptr) {
+        return "Normal mode active. Hardware decode is available on New 3DS.";
+    }
+
+    snprintf(buffer, sizeof(buffer),
+             "Profile: %dx%d | %dfps | %dkbps | packet %d",
+             config->stream.width, config->stream.height, config->stream.fps,
+             config->stream.bitrate, config->stream.packetSize);
+    return buffer;
+}
+
+static const char *stage_name(int stage) {
+    switch (stage) {
+    case STAGE_PLATFORM_INIT:
+        return "Platform init";
+    case STAGE_NAME_RESOLUTION:
+        return "Resolution negotiation";
+    case STAGE_AUDIO_STREAM_INIT:
+        return "Audio stream init";
+    case STAGE_RTSP_HANDSHAKE:
+        return "RTSP handshake";
+    case STAGE_CONTROL_STREAM_INIT:
+        return "Control stream init";
+    case STAGE_VIDEO_STREAM_INIT:
+        return "Video stream init";
+    case STAGE_INPUT_STREAM_INIT:
+        return "Input stream init";
+    case STAGE_CONTROL_STREAM_START:
+        return "Control stream start";
+    case STAGE_VIDEO_STREAM_START:
+        return "Video stream start";
+    case STAGE_AUDIO_STREAM_START:
+        return "Audio stream start";
+    case STAGE_INPUT_STREAM_START:
+        return "Input stream start";
+    default:
+        return "Unknown stage";
+    }
+}
+
+static std::string build_stream_end_message(N3dsConnectionListener *listener) {
+    if (listener == nullptr) {
+        return "The stream ended, but no diagnostic details were available.";
+    }
+
+    const int error_code = listener->get_last_error_code();
+    const int stage = listener->get_last_stage();
+    const int stage_error = listener->get_last_stage_error();
+    const int connection_status = listener->get_last_connection_status();
+
+    if (stage_error != 0 && !listener->has_connection_started()) {
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer),
+                 "Startup failed during %s. Error code: %d.",
+                 stage_name(stage), stage_error);
+        return buffer;
+    }
+
+    switch (error_code) {
+    case ML_ERROR_GRACEFUL_TERMINATION:
+        return "The host closed the stream cleanly.";
+    case ML_ERROR_NO_VIDEO_TRAFFIC:
+        return "No video packets reached the 3DS. Check firewall rules, Sunshine host availability, and local network routing.";
+    case ML_ERROR_NO_VIDEO_FRAME:
+        return "The 3DS received data but could not build frames fast enough. StreamPotato already forced safe mode, so the next suspects are Wi-Fi stability, Sunshine encoder load, or overlays/DRM on the host.";
+    case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
+        return "The host terminated the stream immediately. This usually points to capture failure, DRM content, or Sunshine/GameStream refusing the current desktop/app.";
+    case ML_ERROR_PROTECTED_CONTENT:
+        return "The host reported DRM-protected content. Close video players, streaming apps, or protected overlays on the PC.";
+    case ML_ERROR_FRAME_CONVERSION:
+        return "The host failed a frame conversion step. Disable HDR on the PC and try a simple desktop resolution before reconnecting.";
+    default:
+        if (error_code != 0) {
+            char buffer[256];
+            snprintf(buffer, sizeof(buffer),
+                     "The stream ended with error %d after %s.",
+                     error_code, stage_name(stage));
+            return buffer;
+        }
+        if (connection_status == CONN_STATUS_POOR) {
+            return "The stream stopped after a poor connection state. Stay close to Wi-Fi, prefer 5 GHz, and keep the PC on Ethernet if possible.";
+        }
+        return "The stream stopped.";
+    }
+}
+
+static void wait_for_all_buttons_release() {
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (hidKeysHeld() == 0) {
+            return;
+        }
+
+        if (menu_ui_is_active()) {
+            menu_ui_draw_message("StreamPotato", "Release buttons to continue.",
+                                 build_profile_status(), "Release all inputs");
+        } else {
+            gfxSwapBuffers();
+            gfxFlushBuffers();
+        }
+        gspWaitForVBlank();
+    }
+}
 
 static inline void wait_for_button(std::string prompt = "") {
+    wait_for_all_buttons_release();
+
+    const std::string message =
+        prompt.empty() ? "Press any button to continue." : prompt;
     if (prompt.empty()) {
         printf("\nPress any button to continue\n");
     } else {
         printf("\n%s\n", prompt.c_str());
     }
     while (aptMainLoop()) {
-        gfxSwapBuffers();
-        gfxFlushBuffers();
+        if (menu_ui_is_active()) {
+            menu_ui_draw_message("StreamPotato", message, build_profile_status(),
+                                 "Press any button");
+        } else {
+            gfxSwapBuffers();
+            gfxFlushBuffers();
+        }
         gspWaitForVBlank();
 
         hidScanInput();
@@ -76,62 +426,105 @@ static inline void wait_for_button(std::string prompt = "") {
 }
 
 static void n3ds_exit_handler(void) {
-    NDMU_UnlockState();
-    NDMU_LeaveExclusiveState();
-    ndmuExit();
-    irrstExit();
-    SOCU_ShutdownSockets();
-    SOCU_CloseSockets();
-    socExit();
-    free(SOC_buffer);
-    romfsExit();
-    aptExit();
-    gfxExit();
-    acExit();
+    if (menu_ui_is_active()) {
+        menu_ui_shutdown();
+    }
+    if (g_ndmu_initialized) {
+        if (g_ndmu_locked) {
+            NDMU_UnlockState();
+            g_ndmu_locked = false;
+        }
+        if (g_ndmu_exclusive) {
+            NDMU_LeaveExclusiveState();
+            g_ndmu_exclusive = false;
+        }
+        ndmuExit();
+        g_ndmu_initialized = false;
+    }
+    if (g_soc_initialized) {
+        SOCU_ShutdownSockets();
+        SOCU_CloseSockets();
+        socExit();
+        g_soc_initialized = false;
+    }
+    if (SOC_buffer != NULL) {
+        free(SOC_buffer);
+        SOC_buffer = NULL;
+    }
+    if (g_apt_initialized) {
+        aptExit();
+        g_apt_initialized = false;
+    }
+    if (g_gfx_initialized) {
+        gfxExit();
+        g_gfx_initialized = false;
+    }
+    if (g_ac_initialized) {
+        acExit();
+        g_ac_initialized = false;
+    }
 }
 
 static int console_selection_prompt(std::string prompt,
                                     std::vector<std::string> options,
-                                    int default_idx) {
+                                    int default_idx,
+                                    std::string subtitle = "",
+                                    std::string status = "") {
+    if (status.empty()) {
+        status = build_profile_status();
+    }
+
     int option_idx = default_idx;
-    int last_option_idx = -1;
+    wait_for_all_buttons_release();
+
     while (aptMainLoop()) {
-        if (option_idx != last_option_idx) {
+        if (menu_ui_is_active()) {
+            menu_ui_draw_menu(prompt, subtitle, options, option_idx, status,
+                              "D-Pad: move   A: confirm   B: back");
+        } else {
             consoleClear();
             if (!prompt.empty()) {
                 printf("%s\n", prompt.c_str());
+            }
+            if (!subtitle.empty()) {
+                printf("%s\n\n", subtitle.c_str());
             }
             printf("Press up/down to select\n");
             printf("Press A to confirm\n");
             printf("Press B to go back\n\n");
 
-            for (int i = 0; i < options.size(); i++) {
-                if (i == option_idx) {
+            for (size_t i = 0; i < options.size(); i++) {
+                if ((int)i == option_idx) {
                     printf(">%s\n", options[i].c_str());
                 } else {
                     printf("%s\n", options[i].c_str());
                 }
             }
-            last_option_idx = option_idx;
         }
 
-        gfxSwapBuffers();
-        gfxFlushBuffers();
+        if (!menu_ui_is_active()) {
+            gfxSwapBuffers();
+            gfxFlushBuffers();
+        }
         gspWaitForVBlank();
 
         hidScanInput();
         u32 kDown = hidKeysDown();
 
         if (kDown & KEY_A) {
-            consoleClear();
+            if (!menu_ui_is_active()) {
+                consoleClear();
+            }
             return option_idx;
         }
         if (kDown & KEY_B) {
-            consoleClear();
+            if (!menu_ui_is_active()) {
+                consoleClear();
+            }
             return -1;
         }
         if (kDown & KEY_DOWN) {
-            if (option_idx < options.size() - 1) {
+            if ((size_t)option_idx < options.size() - 1) {
                 option_idx++;
             }
         } else if (kDown & KEY_UP) {
@@ -147,57 +540,66 @@ static int console_selection_prompt(std::string prompt,
 static std::string prompt_for_action(PSERVER_DATA server) {
     if (server->paired) {
         std::vector<std::string> actions = {
-            "stream",
-            "quit stream",
-            "stream settings",
-            "unpair",
+            "Start stream",
+            "Stream settings",
+            "Quit running app",
+            "Unpair host",
         };
-        int idx = console_selection_prompt("Select an action", actions, 0);
+        char subtitle[192];
+        snprintf(subtitle, sizeof(subtitle), "Host ready. GPU: %s",
+                 server->gpuType != NULL ? server->gpuType : "unknown");
+        int idx = console_selection_prompt("Select an action", actions, 0,
+                                           subtitle, build_profile_status());
         if (idx < 0) {
             return "";
         }
-        return actions[idx];
+        static const std::vector<std::string> action_keys = {
+            "stream",
+            "stream settings",
+            "quit stream",
+            "unpair",
+        };
+        return action_keys[idx];
     }
-    std::vector<std::string> actions = {"pair"};
-    int idx = console_selection_prompt("Select an action", actions, 0);
+    std::vector<std::string> actions = {"Pair with host"};
+    int idx = console_selection_prompt("Select an action", actions, 0,
+                                       "This host is not paired yet.",
+                                       build_profile_status());
     if (idx < 0) {
         return "";
     }
-    return actions[idx];
+    return "pair";
 }
 
 static std::string prompt_for_address() {
     auto address_list = list_paired_addresses();
-    address_list.push_back("new");
+    address_list.push_back("Add new host");
     int idx =
-        console_selection_prompt("Select a server address", address_list, 0);
+        console_selection_prompt("Select a host", address_list, 0,
+                                 "Choose a paired PC or add a direct IP.",
+                                 build_profile_status());
     if (idx < 0) {
         return "";
-    } else if (address_list[idx] != "new") {
+    } else if (address_list[idx] != "Add new host") {
         return address_list[idx];
     }
 
     // Prompt users for a custom address
-    SwkbdState swkbd;
-    char *addr_buff = (char *)malloc(MAX_INPUT_CHAR);
-    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 3, -1);
-    swkbdSetHintText(&swkbd, "Address of host to connect to");
-    swkbdInputText(&swkbd, addr_buff, MAX_INPUT_CHAR);
-    std::string addr_string = std::string(addr_buff);
-    free(addr_buff);
-    trim(addr_string);
-    return addr_string;
+    return prompt_for_text_input("Address of host to connect to", "",
+                                 SWKBD_TYPE_NORMAL, MAX_INPUT_CHAR - 1, -1);
 }
 
 static VIDEO_DECODER_TYPE
 prompt_for_video_decoder(VIDEO_DECODER_TYPE default_val) {
     std::vector<std::string> decoders = {
-        "hardware (fast, *new* 3DS only)",
-        "software (slow)",
-        "disable video",
+        "Hardware decoder (New 3DS only)",
+        "Software decoder",
+        "Disable video",
     };
-    int idx = console_selection_prompt("Select a video option", decoders,
-                                       (int)default_val);
+    int idx = console_selection_prompt(
+        "Select a video option", decoders, (int)default_val,
+        "Old 3DS / 2DS should stay on software. StreamPotato safe mode enforces it automatically.",
+        build_profile_status());
     if (idx < 0) {
         return default_val;
     }
@@ -206,10 +608,11 @@ prompt_for_video_decoder(VIDEO_DECODER_TYPE default_val) {
 
 static bool prompt_for_boolean(std::string prompt, bool default_val) {
     std::vector<std::string> options = {
-        "true",
-        "false",
+        "Enabled",
+        "Disabled",
     };
-    int idx = console_selection_prompt(prompt, options, default_val ? 0 : 1);
+    int idx = console_selection_prompt(prompt, options, default_val ? 0 : 1,
+                                       "", build_profile_status());
     if (idx < 0) {
         idx = default_val ? 0 : 1;
     }
@@ -217,96 +620,154 @@ static bool prompt_for_boolean(std::string prompt, bool default_val) {
 }
 
 static int prompt_for_int(std::string initial_text) {
-    char *setting_buff = (char *)malloc(MAX_INPUT_CHAR);
-    memset(setting_buff, 0, MAX_INPUT_CHAR);
+    std::string setting_str =
+        prompt_for_text_input("", initial_text, SWKBD_TYPE_NUMPAD,
+                              MAX_INPUT_CHAR - 1, 8);
+    if (setting_str.empty()) {
+        return std::stoi(initial_text);
+    }
 
-    SwkbdState swkbd;
-    swkbdInit(&swkbd, SWKBD_TYPE_NUMPAD, 1, 8);
-    swkbdSetInitialText(&swkbd, initial_text.c_str());
-    swkbdInputText(&swkbd, setting_buff, MAX_INPUT_CHAR);
-    std::string setting_str = std::string(setting_buff);
-
-    free(setting_buff);
-    trim(setting_str);
-    return std::stoi(setting_str);
+    try {
+        return std::stoi(setting_str);
+    } catch (...) {
+        return std::stoi(initial_text);
+    }
 }
 
 static void prompt_for_stream_settings(PCONFIGURATION config) {
-    std::vector<std::string> setting_names = {
-        "width",
-        "height",
-        "fps",
-        "motion_controls",
-        "bitrate",
-        "packetsize",
-        "sops",
-        "localaudio",
-        "quitappafter",
-        "viewonly",
-        "video_decoder",
-        "swapfacebuttons",
-        "swaptriggersandshoulders",
+    std::vector<std::string> setting_keys = {
+        "width",    "height",      "fps",           "motion_controls",
+        "bitrate",  "packetsize",  "sops",          "localaudio",
+        "quitappafter",           "viewonly",       "video_decoder",
+        "better_screen",          "stable_stream",
+        "ultra_potato",
+        "swapfacebuttons",        "swaptriggersandshoulders",
         "usetriggersformouse",
     };
     int idx = 0;
     while (1) {
-        std::string prompt = "Select a setting";
+        std::vector<std::string> setting_names = {
+            "Width: " + std::to_string(config->stream.width),
+            "Height: " + std::to_string(config->stream.height),
+            "FPS: " + std::to_string(config->stream.fps),
+            std::string("Motion controls: ") +
+                (config->motion_controls ? "enabled" : "disabled"),
+            "Bitrate: " + std::to_string(config->stream.bitrate) + " kbps",
+            "Packet size: " + std::to_string(config->stream.packetSize),
+            std::string("Optimize game settings: ") +
+                (config->sops ? "enabled" : "disabled"),
+            std::string("Audio on host only: ") +
+                (config->localaudio ? "enabled" : "disabled"),
+            std::string("Quit host app after stream: ") +
+                (config->quitappafter ? "enabled" : "disabled"),
+            std::string("View only mode: ") +
+                (config->viewonly ? "enabled" : "disabled"),
+            std::string("Video decoder: ") +
+                std::to_string(config->video_decoder),
+            std::string("Experimental better screen: ") +
+                (config->experimental_better_screen ? "enabled" : "disabled"),
+            std::string("Experimental stable stream: ") +
+                (config->experimental_stable_stream ? "enabled" : "disabled"),
+            std::string("Experimental ultra potato: ") +
+                (config->experimental_ultra_potato ? "enabled" : "disabled"),
+            std::string("Swap face buttons: ") +
+                (config->swap_face_buttons ? "enabled" : "disabled"),
+            std::string("Swap triggers and shoulders: ") +
+                (config->swap_triggers_and_shoulders ? "enabled" : "disabled"),
+            std::string("Triggers as mouse buttons: ") +
+                (config->use_triggers_for_mouse ? "enabled" : "disabled"),
+        };
+
+        std::string prompt = "Tune stream settings";
         if (config->stream.width % GSP_SCREEN_HEIGHT_TOP &&
             config->stream.width % GSP_SCREEN_HEIGHT_BOTTOM) {
             prompt += "\n\nWARNING: Using an unsupported width may "
                       "cause issues (3DS supports multiples of 400 or 320)\n";
         }
         if (config->stream.height % GSP_SCREEN_WIDTH) {
-            prompt += "\n\nWARNING: Using an unsupported height may "
-                      "cause issues (3DS supports multiples of 240)\n";
+            if (!(g_potato.is_potato &&
+                  (config->stream.height == POTATO_HEIGHT ||
+                   config->stream.height == POTATO_BETTER_HEIGHT))) {
+                prompt += "\n\nWARNING: Using an unsupported height may "
+                          "cause issues (3DS usually expects 240 lines, "
+                          "except StreamPotato fill modes at 180 / 225)\n";
+            }
         }
-        idx = console_selection_prompt(prompt, setting_names, idx);
+        idx = console_selection_prompt(prompt, setting_names, idx,
+                                       "Adjust the stream profile.",
+                                       build_profile_status(config));
         if (idx < 0) {
             break;
         }
 
-        if ("width" == setting_names[idx]) {
+        if ("width" == setting_keys[idx]) {
             config->stream.width =
                 prompt_for_int(std::to_string(config->stream.width));
-        } else if ("height" == setting_names[idx]) {
+        } else if ("height" == setting_keys[idx]) {
             config->stream.height =
                 prompt_for_int(std::to_string(config->stream.height));
-        } else if ("motion_controls" == setting_names[idx]) {
+        } else if ("motion_controls" == setting_keys[idx]) {
             config->motion_controls = prompt_for_boolean(
                 "Enable Motion Controls", config->motion_controls);
-        } else if ("fps" == setting_names[idx]) {
+        } else if ("fps" == setting_keys[idx]) {
             config->stream.fps =
                 prompt_for_int(std::to_string(config->stream.fps));
-        } else if ("bitrate" == setting_names[idx]) {
+        } else if ("bitrate" == setting_keys[idx]) {
             config->stream.bitrate =
                 prompt_for_int(std::to_string(config->stream.bitrate));
-        } else if ("packetsize" == setting_names[idx]) {
+        } else if ("packetsize" == setting_keys[idx]) {
             config->stream.packetSize =
                 prompt_for_int(std::to_string(config->stream.packetSize));
-        } else if ("sops" == setting_names[idx]) {
+        } else if ("sops" == setting_keys[idx]) {
             config->sops = prompt_for_boolean(
                 "Optimize Game settings for streaming", config->sops);
-        } else if ("localaudio" == setting_names[idx]) {
+        } else if ("localaudio" == setting_keys[idx]) {
             config->localaudio =
-                prompt_for_boolean("Enable local audio", config->localaudio);
-        } else if ("quitappafter" == setting_names[idx]) {
+                prompt_for_boolean("Play audio on host only",
+                                   config->localaudio);
+        } else if ("quitappafter" == setting_keys[idx]) {
             config->quitappafter = prompt_for_boolean(
                 "Quit app after streaming", config->quitappafter);
-        } else if ("viewonly" == setting_names[idx]) {
+        } else if ("viewonly" == setting_keys[idx]) {
             config->viewonly = prompt_for_boolean("Disable controller input",
                                                   config->viewonly);
-        } else if ("video_decoder" == setting_names[idx]) {
+        } else if ("video_decoder" == setting_keys[idx]) {
             config->video_decoder =
                 prompt_for_video_decoder(config->video_decoder);
-        } else if ("swapfacebuttons" == setting_names[idx]) {
+        } else if ("better_screen" == setting_keys[idx]) {
+            config->experimental_better_screen = prompt_for_boolean(
+                "Experimental Better Screen\nSharper profile with zoom-to-fill "
+                "crop on the top screen. Costs more decode time.",
+                config->experimental_better_screen);
+            if (g_potato.is_potato) {
+                potato_apply_config(config);
+            }
+        } else if ("stable_stream" == setting_keys[idx]) {
+            config->experimental_stable_stream = prompt_for_boolean(
+                "Experimental Stable Stream\nLower FPS and more aggressive "
+                "late-frame dropping to reduce freezes.",
+                config->experimental_stable_stream);
+            if (g_potato.is_potato) {
+                potato_apply_config(config);
+            }
+        } else if ("ultra_potato" == setting_keys[idx]) {
+            config->experimental_ultra_potato = prompt_for_boolean(
+                "Experimental Ultra Potato\nStarts on an ultra-low profile "
+                "and automatically hardens frame skipping when slow frames "
+                "pile up live.",
+                config->experimental_ultra_potato);
+            if (g_potato.is_potato) {
+                potato_apply_config(config);
+            }
+        } else if ("swapfacebuttons" == setting_keys[idx]) {
             config->swap_face_buttons = prompt_for_boolean(
                 "Swaps A/B and X/Y to match Xbox controller layout",
                 config->swap_face_buttons);
-        } else if ("swaptriggersandshoulders" == setting_names[idx]) {
+        } else if ("swaptriggersandshoulders" == setting_keys[idx]) {
             config->swap_triggers_and_shoulders = prompt_for_boolean(
                 "Swaps L/ZL and R/ZR for a more natural feel",
                 config->swap_triggers_and_shoulders);
-        } else if ("usetriggersformouse" == setting_names[idx]) {
+        } else if ("usetriggersformouse" == setting_keys[idx]) {
             config->use_triggers_for_mouse =
                 prompt_for_boolean("Use ZL/ZR as left/right mouse buttons",
                                    config->use_triggers_for_mouse);
@@ -314,25 +775,29 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
     }
 
     // Update the config file
-    char *config_file_path = (char *)MOONLIGHT_3DS_PATH "/moonlight.conf";
+    char *config_file_path = (char *)STREAMPOTATO_CONFIG_PATH;
     config_save(config_file_path, config);
 }
 
 static void init_3ds() {
     Result status = 0;
     acInit();
+    g_ac_initialized = true;
     gfxInit(GSP_RGB565_OES, GSP_RGB565_OES, false);
+    g_gfx_initialized = true;
     gfxSetDoubleBuffering(GFX_TOP, false);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
     consoleInit(GFX_TOP, &DebugTouchHandler::topScreen);
     consoleInit(GFX_BOTTOM, &DebugTouchHandler::bottomScreen);
     consoleSelect(&DebugTouchHandler::topScreen);
+    menu_ui_init();
     atexit(n3ds_exit_handler);
 
     osSetSpeedupEnable(true);
     aptSetSleepAllowed(false);
     aptInit();
+    g_apt_initialized = true;
 
     SOC_buffer = (u32 *)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
     status = socInit(SOC_buffer, SOC_BUFFERSIZE);
@@ -340,10 +805,20 @@ static void init_3ds() {
         printf("socInit: %08lX\n", status);
         exit(1);
     }
+    g_soc_initialized = true;
 
     status = ndmuInit();
-    status |= NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
-    status |= NDMU_LockState();
+    if (R_SUCCEEDED(status)) {
+        g_ndmu_initialized = true;
+        status = NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
+        if (R_SUCCEEDED(status)) {
+            g_ndmu_exclusive = true;
+            status = NDMU_LockState();
+            if (R_SUCCEEDED(status)) {
+                g_ndmu_locked = true;
+            }
+        }
+    }
     if (R_FAILED(status)) {
         printf("Warning: failed to enter exclusive NDM state: %08lX\n", status);
         wait_for_button();
@@ -351,12 +826,20 @@ static void init_3ds() {
 }
 
 static int prompt_for_app_id(PSERVER_DATA server) {
-    PAPP_LIST list = NULL;
-    if (gs_applist(server, &list) != GS_OK) {
-        printf("Can't get app list\n");
+    AppListTaskContext task_context = {
+        .server = server,
+    };
+    int status = run_loading_task("Loading apps",
+                                  "Fetching the host application list.",
+                                  build_profile_status(),
+                                  "Querying the paired host", app_list_task,
+                                  &task_context);
+    if (status != GS_OK || task_context.list == NULL) {
+        wait_for_button("Unable to load the host app list.");
         return -1;
     }
 
+    PAPP_LIST list = task_context.list;
     std::vector<std::string> app_names;
     std::vector<int> app_ids;
     while (list != NULL) {
@@ -366,7 +849,19 @@ static int prompt_for_app_id(PSERVER_DATA server) {
         list = list->next;
     }
 
-    int id_idx = console_selection_prompt("Select an app", app_names, 0);
+    if (app_ids.empty()) {
+        wait_for_button("No launchable apps were returned by the host.");
+        return -1;
+    }
+
+    char subtitle[256];
+    snprintf(subtitle, sizeof(subtitle), "GPU: %s | GFE: %s",
+             server->gpuType != NULL ? server->gpuType : "unknown",
+             server->serverInfo.serverInfoGfeVersion != NULL
+                 ? server->serverInfo.serverInfoGfeVersion
+                 : "unknown");
+    int id_idx = console_selection_prompt("Select an app", app_names, 0,
+                                          subtitle, build_profile_status());
     if (id_idx == -1) {
         return -1;
     }
@@ -416,9 +911,22 @@ static inline void stream_loop(PCONFIGURATION config,
 
 static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
                    std::shared_ptr<N3dsInput> input_handler) {
+    potato_apply_config(config);
+
     int gamepad_mask = 1;
-    int ret = gs_start_app(server, &config->stream, appId, config->sops,
-                           config->localaudio, gamepad_mask);
+    StartAppTaskContext start_context = {
+        .server = server,
+        .stream = &config->stream,
+        .appId = appId,
+        .sops = config->sops,
+        .localaudio = config->localaudio,
+        .gamepad_mask = gamepad_mask,
+    };
+    int ret = run_loading_task("Preparing stream",
+                               "Negotiating the stream session with the host.",
+                               build_profile_status(config),
+                               "Launching app and validating the stream mode",
+                               start_app_task, &start_context);
     if (ret < 0) {
         if (ret == GS_NOT_SUPPORTED_4K)
             printf("Server doesn't support 4K\n");
@@ -436,9 +944,14 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
             printf("Gamestream error: %s\n", gs_error);
         else
             printf("Errorcode starting app: %d\n", ret);
+        menu_ui_init();
         wait_for_button();
         return;
     }
+
+    menu_ui_shutdown();
+    draw_stream_wait_screen(config, "Chargement en cours...",
+                            "En attente de la premiere frame video.");
 
     AUDIO_RENDERER_CALLBACKS *audio_callbacks =
         config->localaudio ? &audio_callbacks_mock : &audio_callbacks_n3ds;
@@ -446,10 +959,17 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
     PDECODER_RENDERER_CALLBACKS video_callbacks = &decoder_callbacks_mock;
     switch (config->video_decoder) {
     case (VIDEO_DECODER_TYPE::HARDWARE_VIDEO_DECODER):
-        video_callbacks = &decoder_callbacks_n3ds_mvd;
+        if (g_potato.is_potato) {
+            printf("[POTATO] Hardware decode is unavailable on Old 3DS/2DS, using StreamPotato software decoder\n");
+            video_callbacks = &decoder_callbacks_potato;
+        } else {
+            video_callbacks = &decoder_callbacks_n3ds_mvd;
+        }
         break;
     case (VIDEO_DECODER_TYPE::SOFTWARE_VIDEO_DECODER):
-        video_callbacks = &decoder_callbacks_n3ds;
+        video_callbacks =
+            g_potato.is_potato ? &decoder_callbacks_potato
+                               : &decoder_callbacks_n3ds;
         break;
     default:
         break;
@@ -474,29 +994,55 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
                                    config->audio_device, 0);
 
     if (status != 0) {
-        n3ds_connection_callbacks.connectionTerminated(status);
+        menu_ui_init();
         printf("Connection failed with error: %d\n", status);
-        wait_for_button();
+        std::string failure_message = build_stream_end_message(connection_listener);
+        if (failure_message == "The stream stopped.") {
+            char buffer[192];
+            snprintf(buffer, sizeof(buffer),
+                     "Connection setup failed during %s. Error code: %d.",
+                     stage_name(connection_listener->get_last_stage()), status);
+            failure_message = buffer;
+        }
+        wait_for_button(failure_message);
+        N3dsConnectionListener::destroy_instance();
         return;
     }
 
     printf("Connected!\n");
     stream_loop(config, connection_listener, input_handler);
 
+    const std::string stream_end_message =
+        build_stream_end_message(connection_listener);
+    const int stream_end_error = connection_listener->get_last_error_code();
+
     LiStopConnection();
     N3dsConnectionListener::destroy_instance();
+    menu_ui_init();
 
     if (config->quitappafter) {
-        printf("Sending app quit request ...\n");
-        gs_quit_app(server);
+        ServerTaskContext task_context = {
+            .server = server,
+        };
+        run_loading_task("Closing app", "Sending the host app quit request.",
+                         build_profile_status(config),
+                         "Stopping the running session on the PC",
+                         quit_app_task, &task_context);
+        server->currentGame = 0;
+    }
+
+    if (stream_end_error != 0) {
+        wait_for_button(stream_end_message);
     }
 }
 
 static int init_server(CONFIGURATION *config, SERVER_DATA *server) {
     printf("Connecting to %s:%d...\n", config->address, config->port);
+    http_set_timeout_s(10);
     gs_cleanup();
     int status = gs_init(server, config->address, config->port, config->key_dir,
                          0, config->unsupported);
+    http_set_timeout_s(60);
     if (status == GS_OUT_OF_MEMORY) {
         printf("Not enough memory\n");
         return 1;
@@ -530,14 +1076,14 @@ static int init_server(CONFIGURATION *config, SERVER_DATA *server) {
 }
 
 static void action_stream(CONFIGURATION *config, SERVER_DATA *server) {
+    potato_apply_config(config);
+
     int appId = prompt_for_app_id(server);
     if (appId == -1) {
         return;
     }
 
     config->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
-
-    consoleClear();
 
     std::shared_ptr<N3dsInput> input_handler = nullptr;
     if (config->viewonly) {
@@ -553,28 +1099,30 @@ static void action_stream(CONFIGURATION *config, SERVER_DATA *server) {
 }
 
 static void action_pair(CONFIGURATION *config, SERVER_DATA *server) {
-    // Extend the timeout to 5 minutes for pairing
-    http_set_timeout_s(5 * 60);
+    // Keep pairing responsive while still giving enough time to enter the PIN
+    http_set_timeout_s(90);
 
     char pin[5];
     sprintf(pin, "%d%d%d%d", (unsigned)random() % 10, (unsigned)random() % 10,
             (unsigned)random() % 10, (unsigned)random() % 10);
-    printf("Please enter the following PIN on the target PC:\n%s\n", pin);
+    PairTaskContext task_context = {
+        .server = server,
+        .pin = &pin[0],
+    };
+    int status = run_loading_task(
+        "Pair With Host", "Enter this PIN on the PC, then validate pairing.",
+        build_profile_status(), "Waiting for host confirmation", pair_task,
+        &task_context, pin);
 
-    // Actually display the PIN on screen by swapping buffers
-    gfxSwapBuffers();
-    gfxFlushBuffers();
-    gspWaitForVBlank();
-
-    if (gs_pair(server, &pin[0]) != GS_OK) {
-        printf("Failed to pair to server: %s\n", gs_error);
+    if (status != GS_OK) {
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "Failed to pair with host: %s",
+                 gs_error != NULL ? gs_error : "unknown error");
+        wait_for_button(buffer);
     } else {
-        printf("Succesfully paired\n");
-        // Display success message before breaking
-        gfxSwapBuffers();
-        gfxFlushBuffers();
-        gspWaitForVBlank();
+        server->paired = true;
         add_pair_address(config->address, config->port);
+        wait_for_button("Host paired successfully.");
     }
 
     // Revert to default HTTP timeout
@@ -582,18 +1130,43 @@ static void action_pair(CONFIGURATION *config, SERVER_DATA *server) {
 }
 
 static void action_unpair(CONFIGURATION *config, SERVER_DATA *server) {
-    if (gs_unpair(server) != GS_OK) {
-        printf("Failed to unpair from server: %s\n", gs_error);
+    ServerTaskContext task_context = {
+        .server = server,
+    };
+    int status =
+        run_loading_task("Unpair Host", "Removing the pairing with this PC.",
+                         build_profile_status(),
+                         "Revoking the current client trust", unpair_task,
+                         &task_context);
+    if (status != GS_OK) {
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "Failed to unpair from host: %s",
+                 gs_error != NULL ? gs_error : "unknown error");
+        wait_for_button(buffer);
     } else {
-        printf("Succesfully unpaired\n");
+        server->paired = false;
         remove_pair_address(config->address, config->port);
+        wait_for_button("Host unpaired successfully.");
     }
 }
 
 static void action_quit_stream(SERVER_DATA *server) {
-    printf("Sending app quit request ...\n");
-    gs_quit_app(server);
-    printf("Request completed\n");
+    ServerTaskContext task_context = {
+        .server = server,
+    };
+    int status =
+        run_loading_task("Quit Running App",
+                         "Sending the app stop request to the host.",
+                         build_profile_status(),
+                         "Stopping the active host session", quit_app_task,
+                         &task_context);
+    if (status != GS_OK) {
+        wait_for_button("The host app did not stop cleanly.");
+        return;
+    }
+
+    server->currentGame = 0;
+    wait_for_button("Host app stopped.");
 }
 
 int main_loop(int argc, char *argv[]) {
@@ -601,6 +1174,9 @@ int main_loop(int argc, char *argv[]) {
 
     CONFIGURATION config;
     config_parse(argc, argv, &config);
+    if (potato_init()) {
+        potato_apply_config(&config);
+    }
 
     while (aptMainLoop()) {
         auto address_string = prompt_for_address();
@@ -617,7 +1193,15 @@ int main_loop(int argc, char *argv[]) {
         config.address = (char *)address_string.c_str();
 
         SERVER_DATA server;
-        if (init_server(&config, &server)) {
+        InitServerTaskContext init_context = {
+            .config = &config,
+            .server = &server,
+        };
+        if (run_loading_task("Connecting to host",
+                             "Checking pairing state and host information.",
+                             build_profile_status(&config),
+                             "Connecting to the selected IP/host",
+                             init_server_task, &init_context)) {
             wait_for_button();
             continue;
         }
@@ -631,21 +1215,14 @@ int main_loop(int argc, char *argv[]) {
 
             if (strcmp("stream", config.action) == 0) {
                 action_stream(&config, &server);
-                break;
             } else if (strcmp("pair", config.action) == 0) {
                 action_pair(&config, &server);
-                wait_for_button();
-                break;
             } else if (strcmp("stream settings", config.action) == 0) {
                 prompt_for_stream_settings(&config);
             } else if (strcmp("unpair", config.action) == 0) {
                 action_unpair(&config, &server);
-                wait_for_button();
-                break;
             } else if (strcmp("quit stream", config.action) == 0) {
                 action_quit_stream(&server);
-                wait_for_button();
-                break;
             } else {
                 printf("%s is not a valid action\n", config.action);
                 wait_for_button();
@@ -659,14 +1236,15 @@ int main(int argc, char *argv[]) {
     try {
         main_loop(argc, argv);
     } catch (const std::exception &ex) {
-        printf("Moonlight crashed with the following error: %s\n", ex.what());
+        printf("StreamPotato crashed with the following error: %s\n",
+               ex.what());
         return 1;
     } catch (const std::string &ex) {
-        printf("Moonlight crashed with the following error message: %s\n",
+        printf("StreamPotato crashed with the following error message: %s\n",
                ex.c_str());
         return 1;
     } catch (...) {
-        printf("Moonlight crashed with an unknown error\n");
+        printf("StreamPotato crashed with an unknown error\n");
         return 1;
     }
     return 0;

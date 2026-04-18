@@ -34,6 +34,7 @@ static u8 *audioBuffer;
 static int samplesPerFrame;
 static int sampleRate;
 static int channelCount;
+static bool ndsp_initialized = false;
 static ndspWaveBuf audio_wave_buf[WAVEBUF_SIZE];
 static int wave_buf_idx = 0;
 
@@ -44,6 +45,10 @@ static int n3ds_renderer_init(int audioConfiguration,
     decoder = opus_multistream_decoder_create(
         opusConfig->sampleRate, opusConfig->channelCount, opusConfig->streams,
         opusConfig->coupledStreams, opusConfig->mapping, &rc);
+    if (decoder == NULL || rc != OPUS_OK) {
+        fprintf(stderr, "opus_multistream_decoder_create() failed: %d\n", rc);
+        return -1;
+    }
 
     sampleRate = opusConfig->sampleRate;
     channelCount = opusConfig->channelCount;
@@ -54,10 +59,16 @@ static int n3ds_renderer_init(int audioConfiguration,
         fprintf(stderr, "ndspInit() failed\n");
         return -1;
     }
+    ndsp_initialized = true;
+    wave_buf_idx = 0;
+    n3ds_audio_disabled = false;
 
-    u8 *audioBuffer = (u8 *)linearAlloc(bytes_per_frame * WAVEBUF_SIZE);
-    if (audioBuffer == NULL)
+    audioBuffer = (u8 *)linearAlloc(bytes_per_frame * WAVEBUF_SIZE);
+    if (audioBuffer == NULL) {
+        ndspExit();
+        ndsp_initialized = false;
         return -1;
+    }
     memset(audioBuffer, 0, bytes_per_frame * WAVEBUF_SIZE);
 
     ndspChnWaveBufClear(0);
@@ -65,7 +76,8 @@ static int n3ds_renderer_init(int audioConfiguration,
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
     ndspChnSetRate(0, sampleRate);
-    ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
+    ndspChnSetFormat(0, channelCount == 1 ? NDSP_FORMAT_MONO_PCM16
+                                          : NDSP_FORMAT_STEREO_PCM16);
 
     float mix[12];
     memset(mix, 0, sizeof(mix));
@@ -89,17 +101,20 @@ static void n3ds_renderer_cleanup() {
         decoder = NULL;
     }
 
-    ndspChnWaveBufClear(0);
-    ndspExit();
+    if (ndsp_initialized) {
+        ndspChnWaveBufClear(0);
+        ndspExit();
+        ndsp_initialized = false;
+    }
     if (audioBuffer != NULL) {
-        free(audioBuffer);
+        linearFree(audioBuffer);
         audioBuffer = NULL;
     }
     printf("Audio renderer shutdown successfully\n");
 }
 
 static void n3ds_renderer_decode_and_play_sample(char *data, int length) {
-    if (n3ds_audio_disabled ||
+    if (decoder == NULL || !ndsp_initialized || n3ds_audio_disabled ||
         (audio_wave_buf[wave_buf_idx].status != NDSP_WBUF_DONE)) {
         return;
     }
@@ -120,7 +135,7 @@ static void n3ds_renderer_decode_and_play_sample(char *data, int length) {
     wave_buf_idx = (wave_buf_idx + 1) % WAVEBUF_SIZE;
 }
 
-extern AUDIO_RENDERER_CALLBACKS audio_callbacks_mock = {
+AUDIO_RENDERER_CALLBACKS audio_callbacks_mock = {
     .init = NULL,
     .cleanup = NULL,
     .decodeAndPlaySample = NULL,

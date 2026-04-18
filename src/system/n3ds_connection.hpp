@@ -42,6 +42,10 @@ class N3dsConnectionListener : public ISubscriber {
     }
     static void destroy_instance() { instance = nullptr; }
 
+    void stage_starting(int stage);
+    void stage_complete(int stage);
+    void stage_failed(int stage, int errorCode);
+    void connection_started();
     void connection_terminated(int errorCode);
     void connection_log_message(const char *format, va_list arglist);
     void connection_status_update(int status);
@@ -50,12 +54,22 @@ class N3dsConnectionListener : public ISubscriber {
                                 unsigned short reportRateHz);
 
     bool is_connection_closed();
+    bool has_connection_started();
+    int get_last_error_code();
+    int get_last_stage();
+    int get_last_stage_error();
+    int get_last_connection_status();
 
   private:
     static std::unique_ptr<N3dsConnectionListener> instance;
     bool enable_motion;
     AtomicVar<bool> debug = false;
     AtomicVar<bool> connection_closed = false;
+    AtomicVar<bool> connection_started_flag = false;
+    AtomicVar<int> last_error_code = 0;
+    AtomicVar<int> last_stage = STAGE_NONE;
+    AtomicVar<int> last_stage_error = 0;
+    AtomicVar<int> last_connection_status = CONN_STATUS_OKAY;
 };
 
 extern CONNECTION_LISTENER_CALLBACKS n3ds_connection_callbacks;

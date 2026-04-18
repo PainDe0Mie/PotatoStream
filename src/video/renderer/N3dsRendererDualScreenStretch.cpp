@@ -31,7 +31,7 @@ N3dsRendererDualScreenStretch::N3dsRendererDualScreenStretch(
       bottom_renderer(src_width, src_height / 2, px_size) {
 
     int px_offset_y = src_height / 2;
-    int line_stride = MOON_CTR_VIDEO_TEX_W * px_size;
+    int line_stride = top_renderer.get_texture_line_stride();
     source_offset = px_offset_y * line_stride;
 }
 

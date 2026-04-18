@@ -28,6 +28,31 @@
 
 #include "pair_record.hpp"
 
+static FILE *open_pair_record_for_write() {
+    FILE *fd = fopen(STREAMPOTATO_3DS_PATH "/paired", "w");
+    if (fd != NULL) {
+        return fd;
+    }
+    return fopen(LEGACY_MOONLIGHT_3DS_PATH "/paired", "w");
+}
+
+static std::vector<std::string> read_pair_records(const char *path,
+                                                  bool *opened) {
+    std::vector<std::string> addresses;
+    std::ifstream pair_file(path);
+    *opened = pair_file.good();
+    if (!*opened) {
+        return addresses;
+    }
+
+    std::string line;
+    while (std::getline(pair_file, line)) {
+        trim(line);
+        addresses.push_back(line);
+    }
+    return addresses;
+}
+
 // trim from start (in place)
 inline void ltrim(std::string &s) {
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
@@ -61,10 +86,13 @@ void add_pair_address(std::string address, uint16_t port) {
     }
     address_list.push_back(address);
 
-    char *address_file = (char *)MOONLIGHT_3DS_PATH "/paired";
-    remove(address_file);
+    remove(STREAMPOTATO_3DS_PATH "/paired");
+    remove(LEGACY_MOONLIGHT_3DS_PATH "/paired");
 
-    FILE *fd = fopen(address_file, "w");
+    FILE *fd = open_pair_record_for_write();
+    if (fd == NULL) {
+        return;
+    }
     for (auto addr_string : address_list) {
         trim(addr_string);
         fprintf(fd, "%s\n", addr_string.c_str());
@@ -77,10 +105,13 @@ void remove_pair_address(std::string address, uint16_t port) {
 
     auto address_list = list_paired_addresses();
 
-    char *address_file = (char *)MOONLIGHT_3DS_PATH "/paired";
-    remove(address_file);
+    remove(STREAMPOTATO_3DS_PATH "/paired");
+    remove(LEGACY_MOONLIGHT_3DS_PATH "/paired");
 
-    FILE *fd = fopen(address_file, "w");
+    FILE *fd = open_pair_record_for_write();
+    if (fd == NULL) {
+        return;
+    }
     for (auto addr_string : address_list) {
         if (addr_string != address) {
             trim(addr_string);
@@ -91,12 +122,11 @@ void remove_pair_address(std::string address, uint16_t port) {
 }
 
 std::vector<std::string> list_paired_addresses() {
-    std::vector<std::string> addresses = std::vector<std::string>();
-    std::ifstream pair_file(MOONLIGHT_3DS_PATH "/paired");
-    std::string line;
-    while (std::getline(pair_file, line)) {
-        trim(line);
-        addresses.push_back(line);
+    bool opened = false;
+    auto addresses = read_pair_records(STREAMPOTATO_3DS_PATH "/paired", &opened);
+    if (opened) {
+        return addresses;
     }
-    return addresses;
+
+    return read_pair_records(LEGACY_MOONLIGHT_3DS_PATH "/paired", &opened);
 }

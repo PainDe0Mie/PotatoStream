@@ -81,6 +81,7 @@ N3dsInput::~N3dsInput() {
     previous_state = GAMEPAD_STATE();
     touch_handler = nullptr;
     aptSetHomeAllowed(true);
+    hidExit();
     printf("Input handler shutdown successfully\n");
 }
 

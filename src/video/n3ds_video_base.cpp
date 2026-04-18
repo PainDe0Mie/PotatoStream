@@ -35,6 +35,8 @@ VideoDecoderBase::VideoDecoderBase(int width, int height) {
     image_width = width > MOON_CTR_VIDEO_TEX_W ? MOON_CTR_VIDEO_TEX_W : width;
     image_height =
         height > MOON_CTR_VIDEO_TEX_H ? MOON_CTR_VIDEO_TEX_H : height;
+    texture_width = n3ds_calc_texture_dim(image_width, MOON_CTR_VIDEO_TEX_W);
+    texture_height = n3ds_calc_texture_dim(image_height, MOON_CTR_VIDEO_TEX_H);
 
     GSPGPU_FramebufferFormat px_fmt = gfxGetScreenFormat(GFX_TOP);
     pixel_size = gspGetBytesPerPixel(px_fmt);

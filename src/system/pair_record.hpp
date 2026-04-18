@@ -19,7 +19,12 @@
 
 #pragma once
 
-#define MOONLIGHT_3DS_PATH "/3ds/moonlight"
+#define STREAMPOTATO_3DS_PATH "/3ds/streampotato"
+#define LEGACY_MOONLIGHT_3DS_PATH "/3ds/moonlight"
+#define STREAMPOTATO_CONFIG_PATH                                           \
+    STREAMPOTATO_3DS_PATH "/streampotato.conf"
+#define LEGACY_MOONLIGHT_CONFIG_PATH                                       \
+    LEGACY_MOONLIGHT_3DS_PATH "/moonlight.conf"
 
 #ifdef __cplusplus
 #include <string>

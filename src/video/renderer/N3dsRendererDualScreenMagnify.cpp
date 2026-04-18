@@ -30,7 +30,8 @@ N3dsRendererDualScreenMagnify::N3dsRendererDualScreenMagnify(
     int dest_width, int dest_height, int src_width, int src_height, int px_size)
     : image_width(src_width), image_height(src_height), px_size(px_size),
       top_renderer(dest_width, dest_height, src_width, src_height, px_size),
-      bottom_renderer(GSP_SCREEN_HEIGHT_BOTTOM, GSP_SCREEN_WIDTH, px_size) {
+      bottom_renderer(GSP_SCREEN_HEIGHT_BOTTOM, GSP_SCREEN_WIDTH, px_size,
+                      top_renderer.get_texture_width()) {
     set_crop_region(GSP_SCREEN_HEIGHT_BOTTOM / 2, GSP_SCREEN_WIDTH / 2);
 
     auto pDispatcher = MessageDispatcher::get_instance();
@@ -56,8 +57,6 @@ void N3dsRendererDualScreenMagnify::set_crop_region(int center_x,
     int x_center_image = (center_x * image_width) / GSP_SCREEN_HEIGHT_BOTTOM;
     int y_center_image = (center_y * image_height) / GSP_SCREEN_WIDTH;
 
-    int y_offset_image = y_center_image - (GSP_SCREEN_WIDTH / 2);
-
     int crop_offset_x = x_center_image - (GSP_SCREEN_HEIGHT_BOTTOM / 2);
     int crop_offset_y = y_center_image - (GSP_SCREEN_WIDTH / 2);
 
@@ -75,7 +74,7 @@ void N3dsRendererDualScreenMagnify::set_crop_region(int center_x,
         crop_offset_y = max_offset_y;
     }
 
-    int line_stride = MOON_CTR_VIDEO_TEX_W * px_size;
+    int line_stride = top_renderer.get_texture_line_stride();
 
     pixel_offset.store(crop_offset_y * line_stride + crop_offset_x * px_size);
 }

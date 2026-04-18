@@ -29,7 +29,28 @@
 std::unique_ptr<N3dsConnectionListener> N3dsConnectionListener::instance =
     nullptr;
 
+void N3dsConnectionListener::stage_starting(int stage) {
+    last_stage.store(stage);
+}
+
+void N3dsConnectionListener::stage_complete(int stage) {
+    last_stage.store(stage);
+    last_stage_error.store(0);
+}
+
+void N3dsConnectionListener::stage_failed(int stage, int errorCode) {
+    last_stage.store(stage);
+    last_stage_error.store(errorCode);
+}
+
+void N3dsConnectionListener::connection_started() {
+    connection_started_flag.store(true);
+    last_error_code.store(0);
+}
+
 void N3dsConnectionListener::connection_terminated(int errorCode) {
+    last_error_code.store(errorCode);
+
     switch (errorCode) {
     case ML_ERROR_GRACEFUL_TERMINATION:
         printf("Connection has been terminated gracefully.\n");
@@ -73,6 +94,8 @@ void N3dsConnectionListener::connection_log_message(const char *format,
 }
 
 void N3dsConnectionListener::connection_status_update(int status) {
+    last_connection_status.store(status);
+
     if (!debug.load()) {
         return;
     }
@@ -153,6 +176,52 @@ bool N3dsConnectionListener::is_connection_closed() {
     return connection_closed.load();
 };
 
+bool N3dsConnectionListener::has_connection_started() {
+    return connection_started_flag.load();
+}
+
+int N3dsConnectionListener::get_last_error_code() {
+    return last_error_code.load();
+}
+
+int N3dsConnectionListener::get_last_stage() { return last_stage.load(); }
+
+int N3dsConnectionListener::get_last_stage_error() {
+    return last_stage_error.load();
+}
+
+int N3dsConnectionListener::get_last_connection_status() {
+    return last_connection_status.load();
+}
+
+static void local_stage_starting(int stage) {
+    auto instance = N3dsConnectionListener::get_instance();
+    if (instance != nullptr) {
+        instance->stage_starting(stage);
+    }
+}
+
+static void local_stage_complete(int stage) {
+    auto instance = N3dsConnectionListener::get_instance();
+    if (instance != nullptr) {
+        instance->stage_complete(stage);
+    }
+}
+
+static void local_stage_failed(int stage, int errorCode) {
+    auto instance = N3dsConnectionListener::get_instance();
+    if (instance != nullptr) {
+        instance->stage_failed(stage, errorCode);
+    }
+}
+
+static void local_connection_started() {
+    auto instance = N3dsConnectionListener::get_instance();
+    if (instance != nullptr) {
+        instance->connection_started();
+    }
+}
+
 static void local_connection_terminated(int errorCode) {
     auto instance = N3dsConnectionListener::get_instance();
     if (instance != nullptr) {
@@ -188,6 +257,10 @@ static void local_set_motion_event_state(unsigned short controllerNumber,
 }
 
 CONNECTION_LISTENER_CALLBACKS n3ds_connection_callbacks{
+    .stageStarting = local_stage_starting,
+    .stageComplete = local_stage_complete,
+    .stageFailed = local_stage_failed,
+    .connectionStarted = local_connection_started,
     .connectionTerminated = local_connection_terminated,
     .logMessage = local_connection_log_message,
     .connectionStatusUpdate = local_connection_status_update,
