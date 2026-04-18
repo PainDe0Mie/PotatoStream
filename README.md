@@ -106,22 +106,6 @@ make
 
 ---
 
-## Expected performance
-
-**Old 3DS / 2DS** — Potato mode (400×240, soft decode + Y2RU):
-
-| Scene type | Estimated FPS |
-|---|---|
-| Menus / slow games (RPG, turn-based) | 15–24 fps |
-| Average action games | 10–15 fps |
-| Fast-paced / FPS games | < 10 fps |
-
-Network latency around 150–200ms (fine for games that don't require frame-perfect timing)
-
-**New 3DS / New 2DS XL** : standard MVD hardware decode, same performance as original moonlight-N3DS.
-
----
-
 ## Based on
 
 - [moonlight-N3DS](https://github.com/zoeyjodon/moonlight-N3DS) by zoeyjodon
