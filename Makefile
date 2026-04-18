@@ -33,7 +33,7 @@ include $(DEVKITARM)/3ds_rules
 #     - icon.png
 #     - <libctru folder>/default_icon.png
 #---------------------------------------------------------------------------------
-TARGET		:=	moonlight
+TARGET		:=	streampotato
 BUILD		:=	build
 SOURCES		:=	src \
 				src/system/ \
@@ -42,6 +42,7 @@ SOURCES		:=	src \
 				src/input/touch \
 				src/video/ \
 				src/video/renderer \
+				src/potato \
 				libgamestream \
 				third_party/h264bitstream \
 				third_party/libuuid \
@@ -50,6 +51,7 @@ SOURCES		:=	src \
 				third_party/moonlight-common-c/src
 DATA		:=	3ds/data
 INCLUDES	:=	src \
+				src/potato \
 				libgamestream \
 				third_party/h264bitstream \
 				third_party/libuuid \
@@ -62,17 +64,17 @@ GFXBUILD	:=	$(BUILD)
 
 
 # 3dsx
-APP_TITLE	:=	Moonlight
-APP_DESCRIPTION	:=	Moonlight Streaming Client
-APP_AUTHOR	:=	zoeyjodon
-ICON		:=	3ds/res/ic_moonlight.png
+APP_TITLE	:=	StreamPotato
+APP_DESCRIPTION	:=	StreamPotato pour Old 3DS/2DS
+APP_AUTHOR	:=	PainDe0Mie
+ICON		:=	3ds/res/ic_streampotato.png
 
 # CIA
 BANNER_AUDIO	:=	3ds/res/banner.wav
 BANNER_IMAGE	:=	3ds/res/banner.png
 RSF_PATH		:=	3ds/res/app.rsf
-UNIQUE_ID		:=	0x3600
-PRODUCT_CODE	:=	CTR-P-MOONLIGHT
+UNIQUE_ID		:=	0x3700
+PRODUCT_CODE	:=	CTR-P-STRPOTATO
 ICON_FLAGS		:=	nosavebackups,visible
 
 # Version
@@ -83,17 +85,20 @@ VERSION_MICRO	:=	0
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+ARCH	:=	-march=armv6k -mfpu=vfp -mfloat-abi=hard -mtp=soft
 
-CFLAGS	:=	-g -Wall -O2 -mword-relocations -Wno-psabi \
+CFLAGS	+=	-g -Wall -O2 -mword-relocations -Wno-psabi \
 			-fomit-frame-pointer -ffunction-sections \
 			-DVERSION_MAJOR=$(VERSION_MAJOR) -DVERSION_MINOR=$(VERSION_MINOR) -DVERSION_MICRO=$(VERSION_MICRO) \
-			$(ARCH)
+			$(ARCH) -I$(DEVKITPRO)/libctru/include
 
 # TODO: Reenable build warnings and actually address them
 CFLAGS	+=	$(INCLUDE) -D__3DS__ -DUSE_MBEDTLS -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fexceptions -std=gnu++17
+# CXXFLAGS hérite de CFLAGS MAIS on retire les flags C-only pour éviter les warnings
+# "valid for C/ObjC but not for C++"
+CXXFLAGS	:= $(filter-out -Wno-implicit-function-declaration -Wno-incompatible-pointer-types,$(CFLAGS)) \
+				-fno-rtti -fexceptions -std=gnu++17
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs $(ARCH) -Wl,-Map,$(notdir $*.map)
@@ -104,7 +109,7 @@ LIBS	:= -lswresample -lavformat -lswscale -lavcodec -lavutil -lcitro2d -lcitro3d
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(CTRULIB) $(DEVKITPRO)/extra_lib
+LIBDIRS	:= $(PORTLIBS) $(CTRULIB) $(DEVKITPRO)/extra_lib C:/devkitPro/libctru
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
@@ -288,7 +293,7 @@ $(OUTPUT).elf	:	$(OFILES)
 %.bgr: %.png
 #---------------------------------------------------------------------------------
 	@echo $(notdir $<)
-	@ffmpeg -vcodec png -i $< -vf transpose=1 -vcodec rawvideo -f rawvideo -pix_fmt rgb565 $@
+	@C:/Python314/python.exe C:/CODECODECODECODECODECOMPILATION/PotatoStream_Build/png_to_bgr565.py $< $@
 	@cp $@ $@.bmp
 
 #---------------------------------------------------------------------------------
