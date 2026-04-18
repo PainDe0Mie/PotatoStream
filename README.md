@@ -18,10 +18,10 @@ The Old 3DS / 2DS has **no** H.264 hardware decoder (MVD is New 3DS only). The o
 PotatoStream changes that:
 
 - **Automatic hardware detection**: Potato mode activates automatically on Old 3DS/2DS | New 3DS keeps using the MVD hardware decoder as usual
-- **Adapted stream config**: 400×240 @ 24fps, 3 Mbps —> matched to the actual capabilities of the ARM11 @ 268MHz
+- **Adapted stream config**: 400×240 @ 24fps, 3 Mbps -> matched to the actual capabilities of the ARM11 @ 268MHz
 - **Y2RU pipeline**: uses the hardware YUV→RGB converter available on *all* 3DS models for frame conversion
 - **Smart frame skip**: if the CPU falls behind its frame budget, packets are cleanly dropped instead of letting latency accumulate
-- **Correct ARM11 compiler flags**: `-march=armv6k -mfpu=vfp -mfloat-abi=hard` — no NEON (not available on Old 3DS), no emulated float
+- **Correct ARM11 compiler flags**: `-march=armv6k -mfpu=vfp -mfloat-abi=hard` - no NEON (not available on Old 3DS), no emulated float
 
 ---
 
@@ -58,7 +58,7 @@ Or scan the QR code with FBI:
    - Windows: `Win + R` → `cmd` → `ipconfig` → look for "IPv4 Address"
 4. Select `Pair` and note the PIN displayed on screen
 5. In the Sunshine web UI (`https://localhost:47990`), enter the PIN
-6. Pairing is complete — you can now start streaming
+6. Pairing is complete - you can now start streaming
 
 ### Streaming
 
@@ -83,7 +83,7 @@ bitrate=3000
 sops=false
 ```
 
-New 3DS users can use higher settings — the default config from the original moonlight-N3DS applies.
+New 3DS users can use higher settings - the default config from the original moonlight-N3DS applies.
 
 ---
 
@@ -119,4 +119,4 @@ make
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE)
+GPL-3.0 - see [LICENSE](LICENSE)
