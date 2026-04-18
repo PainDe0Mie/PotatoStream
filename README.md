@@ -1,5 +1,8 @@
 # PotatoStream
 
+<img width="512" height="256" alt="banner" src="https://github.com/user-attachments/assets/638755f4-deb1-4535-98da-36d30f4848d9" />
+<br><br>
+
 **PotatoStream** is a game streaming client for **all Nintendo 3DS and 2DS models**, forked from [moonlight-N3DS](https://github.com/zoeyjodon/moonlight-N3DS) by zoeyjodon. Built with a focus on making streaming actually usable on **Old 3DS, Old 3DS XL and 2DS**, but works on New 3DS and New 2DS XL too.
 
 Compatible with [Sunshine](https://github.com/LizardByte/Sunshine) (open-source, recommended) and NVIDIA GameStream.
