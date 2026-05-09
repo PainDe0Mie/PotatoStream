@@ -59,9 +59,10 @@ typedef struct _CONFIGURATION {
     bool experimental_better_screen;
     bool experimental_stable_stream;
     bool experimental_ultra_potato;
+    bool experimental_stereoscopic_3d;
 } CONFIGURATION, *PCONFIGURATION;
 
 bool config_file_parse(PCONFIGURATION config);
 void config_parse(int argc, char *argv[], PCONFIGURATION config);
 void parse_argument(int c, char *value, PCONFIGURATION config);
-void config_save(char *filename, PCONFIGURATION config);
+bool config_save(const char *filename, PCONFIGURATION config);

@@ -22,9 +22,12 @@
 #include "system/pair_record.hpp"
 #include "util.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <getopt.h>
+#include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define USER_PATHS "."
@@ -56,8 +59,19 @@ static struct option long_options[] = {
     {"better_screen", required_argument, NULL, 'D'},
     {"stable_stream", required_argument, NULL, 'E'},
     {"ultra_potato", required_argument, NULL, 'F'},
+    {"stereoscopic_3d", required_argument, NULL, 'G'},
     {0, 0, 0, 0},
 };
+
+static char *copy_config_string(const std::string &value) {
+    char *buffer = static_cast<char *>(malloc(value.size() + 1));
+    if (buffer == NULL) {
+        return NULL;
+    }
+
+    memcpy(buffer, value.c_str(), value.size() + 1);
+    return buffer;
+}
 
 void parse_argument(int c, char *value, PCONFIGURATION config) {
     switch (c) {
@@ -130,14 +144,18 @@ void parse_argument(int c, char *value, PCONFIGURATION config) {
         config->experimental_ultra_potato =
             ((value != NULL) && (strcmp(value, "true") == 0));
         break;
+    case 'G':
+        config->experimental_stereoscopic_3d =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
     case 1:
         if (config->action == NULL)
             config->action = value;
         else if (config->address == NULL)
             config->address = value;
         else {
-            perror("Too many options");
-            exit(-1);
+            fprintf(stderr, "Ignoring unexpected extra argument: %s\n",
+                    value != NULL ? value : "(null)");
         }
         break;
     }
@@ -151,19 +169,38 @@ static bool config_file_parse_path(const char *filename, PCONFIGURATION config) 
 
     std::string line;
     while (std::getline(config_file, line)) {
-        char *key = NULL, *value = NULL;
-        if (sscanf(line.c_str(), "%ms = %m[^\n]", &key, &value) == 2) {
-            if (strcmp(key, "address") == 0) {
-                config->address = value;
-            } else {
-                for (int i = 0; long_options[i].name != NULL; i++) {
-                    if (strcmp(long_options[i].name, key) == 0) {
-                        if (long_options[i].has_arg == required_argument)
-                            parse_argument(long_options[i].val, value, config);
-                        else if (strcmp("true", value) == 0)
-                            parse_argument(long_options[i].val, NULL, config);
-                    }
-                }
+        trim(line);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+
+        size_t separator_pos = line.find('=');
+        if (separator_pos == std::string::npos) {
+            continue;
+        }
+
+        std::string key = line.substr(0, separator_pos);
+        std::string value = line.substr(separator_pos + 1);
+        trim(key);
+        trim(value);
+        if (key.empty() || value.empty()) {
+            continue;
+        }
+
+        if (key == "address") {
+            config->address = copy_config_string(value);
+            continue;
+        }
+        if (key == "app") {
+            config->app = copy_config_string(value);
+            continue;
+        }
+
+        for (int i = 0; long_options[i].name != NULL; i++) {
+            if (key == long_options[i].name) {
+                parse_argument(long_options[i].val,
+                               const_cast<char *>(value.c_str()), config);
+                break;
             }
         }
     }
@@ -177,14 +214,21 @@ bool config_file_parse(PCONFIGURATION config) {
     return config_file_parse_path(LEGACY_MOONLIGHT_CONFIG_PATH, config);
 }
 
-void config_save(char *filename, PCONFIGURATION config) {
+bool config_save(const char *filename, PCONFIGURATION config) {
+    if (strcmp(filename, STREAMPOTATO_CONFIG_PATH) == 0) {
+        mkdir(STREAMPOTATO_3DS_PATH, 0775);
+    } else if (strcmp(filename, LEGACY_MOONLIGHT_CONFIG_PATH) == 0) {
+        mkdir(LEGACY_MOONLIGHT_3DS_PATH, 0775);
+    }
+
     FILE *fd = fopen(filename, "w");
     if (fd == NULL && strcmp(filename, STREAMPOTATO_CONFIG_PATH) == 0) {
+        mkdir(LEGACY_MOONLIGHT_3DS_PATH, 0775);
         fd = fopen(LEGACY_MOONLIGHT_CONFIG_PATH, "w");
     }
     if (fd == NULL) {
         fprintf(stderr, "Can't open configuration file: %s\n", filename);
-        exit(EXIT_FAILURE);
+        return false;
     }
 
     write_config_int(fd, "width", config->stream.width);
@@ -206,11 +250,14 @@ void config_save(char *filename, PCONFIGURATION config) {
     write_config_bool(fd, "better_screen", config->experimental_better_screen);
     write_config_bool(fd, "stable_stream", config->experimental_stable_stream);
     write_config_bool(fd, "ultra_potato", config->experimental_ultra_potato);
+    write_config_bool(fd, "stereoscopic_3d",
+                      config->experimental_stereoscopic_3d);
 
     if (strcmp(config->app, "Steam") != 0)
         write_config_string(fd, "app", config->app);
 
     fclose(fd);
+    return true;
 }
 
 void config_parse(int argc, char *argv[], PCONFIGURATION config) {
@@ -253,6 +300,7 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->experimental_better_screen = false;
     config->experimental_stable_stream = false;
     config->experimental_ultra_potato = false;
+    config->experimental_stereoscopic_3d = false;
 
     config_file_parse(config);
 
