@@ -19,16 +19,21 @@ extern "C" {
 #define POTATO_STABLE_FPS 15
 #define POTATO_STABLE_BITRATE_KBPS 1100
 #define POTATO_STABLE_BETTER_BITRATE_KBPS 1600
-#define POTATO_ULTRA_WIDTH 256
-#define POTATO_ULTRA_HEIGHT 144
-#define POTATO_ULTRA_FPS 14
-#define POTATO_ULTRA_BITRATE_KBPS 850
+#define POTATO_ULTRA_WIDTH 320
+#define POTATO_ULTRA_HEIGHT 180
+#define POTATO_ULTRA_FPS 12
+#define POTATO_ULTRA_BITRATE_KBPS 750
+#define POTATO_STEREO_WIDTH 640
+#define POTATO_STEREO_HEIGHT 180
+#define POTATO_STEREO_FPS 12
+#define POTATO_STEREO_BITRATE_KBPS 1200
 #define POTATO_AUDIO_BUF_MS 60
 #define POTATO_FRAME_SKIP 2
 #define POTATO_STABLE_FRAME_SKIP 6
 #define POTATO_PACKET_SIZE 1024
 #define POTATO_STABLE_PACKET_SIZE 960
 #define POTATO_ULTRA_FRAME_SKIP 10
+#define POTATO_STEREO_FRAME_SKIP 8
 #define POTATO_ULTRA_PACKET_SIZE 896
 
 typedef struct {
@@ -43,6 +48,7 @@ typedef struct {
     bool experimental_better_screen;
     bool experimental_stable_stream;
     bool experimental_ultra_potato;
+    bool experimental_stereoscopic_3d;
     bool dynamic_ultra_active;
     bool render_crop_to_fit;
     bool render_linear_filter;
@@ -69,6 +75,7 @@ void potato_frame_skipped(void);
 void potato_print_stats(void);
 void potato_apply_config(void *moonlight_config);
 void potato_record_decode_ticks(uint64_t decode_ticks);
+void potato_set_stereoscopic_3d(bool enabled);
 
 #ifdef __cplusplus
 }

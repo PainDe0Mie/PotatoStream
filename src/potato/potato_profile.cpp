@@ -19,12 +19,23 @@ static void potato_resolve_profile(CONFIGURATION *cfg) {
     g_potato.experimental_better_screen = cfg->experimental_better_screen;
     g_potato.experimental_stable_stream = cfg->experimental_stable_stream;
     g_potato.experimental_ultra_potato = cfg->experimental_ultra_potato;
+    g_potato.experimental_stereoscopic_3d =
+        cfg->experimental_stereoscopic_3d;
     g_potato.render_crop_to_fit = g_potato.experimental_better_screen;
     g_potato.render_linear_filter =
         g_potato.experimental_better_screen &&
         !g_potato.experimental_stable_stream;
 
-    if (g_potato.experimental_ultra_potato) {
+    if (g_potato.experimental_stereoscopic_3d) {
+        g_potato.width = POTATO_STEREO_WIDTH;
+        g_potato.height = POTATO_STEREO_HEIGHT;
+        g_potato.fps = POTATO_STEREO_FPS;
+        g_potato.bitrate_kbps = POTATO_STEREO_BITRATE_KBPS;
+        g_potato.max_consecutive_skips = POTATO_STEREO_FRAME_SKIP;
+        g_potato.packet_size = POTATO_STABLE_PACKET_SIZE;
+        g_potato.render_crop_to_fit = false;
+        g_potato.render_linear_filter = false;
+    } else if (g_potato.experimental_ultra_potato) {
         g_potato.width = POTATO_ULTRA_WIDTH;
         g_potato.height = POTATO_ULTRA_HEIGHT;
         g_potato.fps = POTATO_ULTRA_FPS;
@@ -45,7 +56,9 @@ static void potato_resolve_profile(CONFIGURATION *cfg) {
         g_potato.bitrate_kbps = POTATO_BITRATE_KBPS;
     }
 
-    if (g_potato.experimental_ultra_potato) {
+    if (g_potato.experimental_stereoscopic_3d) {
+        // SBS 3D owns the stream size; other experimental profiles are disabled.
+    } else if (g_potato.experimental_ultra_potato) {
         // Ultra mode owns the base stream profile and runtime fallback.
     } else if (g_potato.experimental_stable_stream) {
         g_potato.fps = POTATO_STABLE_FPS;
@@ -67,13 +80,13 @@ bool potato_init(void) {
 
     Result rc = cfguInit();
     if (R_FAILED(rc)) {
-        printf("[POTATO] cfguInit failed (0x%08lX), assuming Old 3DS\n", rc);
+        printf("[P.S.] cfguInit failed (0x%08lX), assuming Old 3DS\n", rc);
         g_potato.model = CFG_MODEL_2DS;
     } else {
         rc = CFGU_GetSystemModel(&g_potato.model);
         cfguExit();
         if (R_FAILED(rc)) {
-            printf("[POTATO] CFGU_GetSystemModel failed (0x%08lX), assuming Old 3DS\n",
+            printf("[P.S.] CFGU_GetSystemModel failed (0x%08lX), assuming Old 3DS\n",
                    rc);
             g_potato.model = CFG_MODEL_2DS;
         }
@@ -91,7 +104,7 @@ bool potato_init(void) {
     }
 
     if (!g_potato.is_potato) {
-        printf("[POTATO] New 3DS detected (model=%d), keeping normal mode\n",
+        printf("[P.S.] New 3DS detected (model=%d), keeping normal mode\n",
                g_potato.model);
         return false;
     }
@@ -105,6 +118,7 @@ bool potato_init(void) {
     g_potato.experimental_better_screen = false;
     g_potato.experimental_stable_stream = false;
     g_potato.experimental_ultra_potato = false;
+    g_potato.experimental_stereoscopic_3d = false;
     g_potato.dynamic_ultra_active = false;
     g_potato.render_crop_to_fit = false;
     g_potato.render_linear_filter = false;
@@ -128,13 +142,13 @@ bool potato_init(void) {
         break;
     }
 
-    printf("[POTATO] StreamPotato mode enabled\n");
-    printf("[POTATO] Model   : %s\n", model_name);
-    printf("[POTATO] Stream  : %dx%d @ %d fps\n", g_potato.width,
+    printf("[P.S.] StreamPotato mode enabled\n");
+    printf("[P.S.] Model   : %s\n", model_name);
+    printf("[P.S.] Stream  : %dx%d @ %d fps\n", g_potato.width,
            g_potato.height, g_potato.fps);
-    printf("[POTATO] Bitrate : %d Kbps\n", g_potato.bitrate_kbps);
-    printf("[POTATO] Audio   : host playback only\n");
-    printf("[POTATO] Budget  : %llu ticks/frame\n",
+    printf("[P.S.] Bitrate : %d Kbps\n", g_potato.bitrate_kbps);
+    printf("[P.S.] Audio   : host playback only\n");
+    printf("[P.S.] Budget  : %llu ticks/frame\n",
            g_potato.frame_budget_ticks);
 
     return true;
@@ -225,10 +239,10 @@ void potato_record_decode_ticks(uint64_t decode_ticks) {
 
     if (!g_potato.dynamic_ultra_active && g_potato.ultra_pressure >= 8) {
         g_potato.dynamic_ultra_active = true;
-        printf("[POTATO] ultra runtime mode engaged\n");
+        printf("[P.S.] ultra runtime mode engaged\n");
     } else if (g_potato.dynamic_ultra_active && g_potato.ultra_pressure <= 2) {
         g_potato.dynamic_ultra_active = false;
-        printf("[POTATO] ultra runtime mode recovered\n");
+        printf("[P.S.] ultra runtime mode recovered\n");
     }
 }
 
@@ -243,7 +257,7 @@ void potato_print_stats(void) {
     }
 
     uint32_t skip_pct = (g_potato.frames_skipped * 100) / total;
-    printf("[POTATO] Stats: %lu decoded, %lu skipped (%lu%%)\n",
+    printf("[P.S.] Stats: %lu decoded, %lu skipped (%lu%%)\n",
            (unsigned long)g_potato.frames_decoded,
            (unsigned long)g_potato.frames_skipped,
            (unsigned long)skip_pct);
@@ -265,4 +279,8 @@ void potato_apply_config(void *moonlight_config) {
     cfg->video_decoder = VIDEO_DECODER_TYPE::SOFTWARE_VIDEO_DECODER;
     cfg->localaudio = g_potato.host_audio;
     cfg->motion_controls = false;
+}
+
+void potato_set_stereoscopic_3d(bool enabled) {
+    g_potato.experimental_stereoscopic_3d = enabled;
 }
