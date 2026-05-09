@@ -21,6 +21,7 @@
 #include "errors.h"
 
 #include <expat.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define STATUS_OK 200
@@ -31,6 +32,13 @@ struct xml_query {
   int start;
   void* data;
 };
+
+static char *xml_alloc_empty(void) {
+  char *memory = calloc(1, 1);
+  if (memory == NULL)
+    gs_error = "Not enough memory while parsing XML";
+  return memory;
+}
 
 static void XMLCALL _xml_start_element(void *userData, const char *name, const char **atts) {
   struct xml_query *search = (struct xml_query*) userData;
@@ -56,15 +64,16 @@ static void XMLCALL _xml_start_applist_element(void *userData, const char *name,
     app->next = (PAPP_LIST) search->data;
     search->data = app;
   } else if (strcmp("ID", name) == 0 || strcmp("AppTitle", name) == 0) {
-    search->memory = malloc(1);
+    free(search->memory);
+    search->memory = xml_alloc_empty();
     search->size = 0;
-    search->start = 1;
+    search->start = search->memory != NULL ? 1 : 0;
   }
 }
 
 static void XMLCALL _xml_end_applist_element(void *userData, const char *name) {
   struct xml_query *search = (struct xml_query*) userData;
-  if (search->start) {
+  if (search->start && search->memory != NULL) {
     PAPP_LIST list = (PAPP_LIST) search->data;
     if (list == NULL)
       return;
@@ -72,8 +81,10 @@ static void XMLCALL _xml_end_applist_element(void *userData, const char *name) {
     if (strcmp("ID", name) == 0) {
         list->id = atoi(search->memory);
         free(search->memory);
+        search->memory = NULL;
     } else if (strcmp("AppTitle", name) == 0) {
         list->name = search->memory;
+        search->memory = NULL;
     }
     search->start = 0;
   }
@@ -88,15 +99,16 @@ static void XMLCALL _xml_start_mode_element(void *userData, const char *name, co
       search->data = mode;
     }
   } else if (search->data != NULL && (strcmp("Height", name) == 0 || strcmp("Width", name) == 0 || strcmp("RefreshRate", name) == 0)) {
-    search->memory = malloc(1);
+    free(search->memory);
+    search->memory = xml_alloc_empty();
     search->size = 0;
-    search->start = 1;
+    search->start = search->memory != NULL ? 1 : 0;
   }
 }
 
 static void XMLCALL _xml_end_mode_element(void *userData, const char *name) {
   struct xml_query *search = (struct xml_query*) userData;
-  if (search->data != NULL && search->start) {
+  if (search->data != NULL && search->start && search->memory != NULL) {
     PDISPLAY_MODE mode = (PDISPLAY_MODE) search->data;
     if (strcmp("Width", name) == 0)
       mode->width = atoi(search->memory);
@@ -106,6 +118,7 @@ static void XMLCALL _xml_end_mode_element(void *userData, const char *name) {
       mode->refresh = atoi(search->memory);
 
     free(search->memory);
+    search->memory = NULL;
     search->start = 0;
   }
 }
@@ -127,10 +140,17 @@ static void XMLCALL _xml_end_status_element(void *userData, const char *name) { 
 static void XMLCALL _xml_write_data(void *userData, const XML_Char *s, int len) {
   struct xml_query *search = (struct xml_query*) userData;
   if (search->start > 0) {
-    search->memory = realloc(search->memory, search->size + len + 1);
-    if(search->memory == NULL)
+    char *new_memory = realloc(search->memory, search->size + len + 1);
+    if(new_memory == NULL) {
+      free(search->memory);
+      search->memory = NULL;
+      search->size = 0;
+      search->start = 0;
+      gs_error = "Not enough memory while parsing XML";
       return;
+    }
 
+    search->memory = new_memory;
     memcpy(&(search->memory[search->size]), s, len);
     search->size += len;
     search->memory[search->size] = 0;
@@ -139,11 +159,22 @@ static void XMLCALL _xml_write_data(void *userData, const XML_Char *s, int len) 
 
 int xml_search(char* data, size_t len, char* node, char** result) {
   struct xml_query search;
+  if (result == NULL || data == NULL || node == NULL) {
+    return GS_INVALID;
+  }
+  *result = NULL;
   search.data = node;
   search.start = 0;
-  search.memory = calloc(1, 1);
+  search.memory = xml_alloc_empty();
+  if (search.memory == NULL)
+    return GS_OUT_OF_MEMORY;
   search.size = 0;
   XML_Parser parser = XML_ParserCreate("UTF-8");
+  if (parser == NULL) {
+    free(search.memory);
+    gs_error = "Not enough memory while creating XML parser";
+    return GS_OUT_OF_MEMORY;
+  }
   XML_SetUserData(parser, &search);
   XML_SetElementHandler(parser, _xml_start_element, _xml_end_element);
   XML_SetCharacterDataHandler(parser, _xml_write_data);
@@ -166,11 +197,19 @@ int xml_search(char* data, size_t len, char* node, char** result) {
 
 int xml_applist(char* data, size_t len, PAPP_LIST *app_list) {
   struct xml_query query;
-  query.memory = calloc(1, 1);
+  if (app_list == NULL || data == NULL)
+    return GS_INVALID;
+
+  *app_list = NULL;
+  query.memory = NULL;
   query.size = 0;
   query.start = 0;
   query.data = NULL;
   XML_Parser parser = XML_ParserCreate("UTF-8");
+  if (parser == NULL) {
+    gs_error = "Not enough memory while creating XML parser";
+    return GS_OUT_OF_MEMORY;
+  }
   XML_SetUserData(parser, &query);
   XML_SetElementHandler(parser, _xml_start_applist_element, _xml_end_applist_element);
   XML_SetCharacterDataHandler(parser, _xml_write_data);
@@ -178,19 +217,33 @@ int xml_applist(char* data, size_t len, PAPP_LIST *app_list) {
     int code = XML_GetErrorCode(parser);
     gs_error = XML_ErrorString(code);
     XML_ParserFree(parser);
+    free(query.memory);
+    xml_free_applist((PAPP_LIST) query.data);
     return GS_INVALID;
+  } else if (query.memory == NULL && query.start > 0) {
+    XML_ParserFree(parser);
+    xml_free_applist((PAPP_LIST) query.data);
+    return GS_OUT_OF_MEMORY;
   }
 
   XML_ParserFree(parser);
+  free(query.memory);
   *app_list = (PAPP_LIST) query.data;
 
   return GS_OK;
 }
 
 int xml_modelist(char* data, size_t len, PDISPLAY_MODE *mode_list) {
+  if (mode_list == NULL || data == NULL)
+    return GS_INVALID;
+
+  *mode_list = NULL;
   struct xml_query query = {0};
-  query.memory = calloc(1, 1);
   XML_Parser parser = XML_ParserCreate("UTF-8");
+  if (parser == NULL) {
+    gs_error = "Not enough memory while creating XML parser";
+    return GS_OUT_OF_MEMORY;
+  }
   XML_SetUserData(parser, &query);
   XML_SetElementHandler(parser, _xml_start_mode_element, _xml_end_mode_element);
   XML_SetCharacterDataHandler(parser, _xml_write_data);
@@ -198,10 +251,17 @@ int xml_modelist(char* data, size_t len, PDISPLAY_MODE *mode_list) {
     int code = XML_GetErrorCode(parser);
     gs_error = XML_ErrorString(code);
     XML_ParserFree(parser);
+    free(query.memory);
+    xml_free_modelist((PDISPLAY_MODE) query.data);
     return GS_INVALID;
+  } else if (query.memory == NULL && query.start > 0) {
+    XML_ParserFree(parser);
+    xml_free_modelist((PDISPLAY_MODE) query.data);
+    return GS_OUT_OF_MEMORY;
   }
 
   XML_ParserFree(parser);
+  free(query.memory);
   *mode_list = (PDISPLAY_MODE) query.data;
 
   return GS_OK;
@@ -209,8 +269,15 @@ int xml_modelist(char* data, size_t len, PDISPLAY_MODE *mode_list) {
 }
 
 int xml_status(char* data, size_t len) {
+  if (data == NULL)
+    return GS_INVALID;
+
   int status = 0;
   XML_Parser parser = XML_ParserCreate("UTF-8");
+  if (parser == NULL) {
+    gs_error = "Not enough memory while creating XML parser";
+    return GS_OUT_OF_MEMORY;
+  }
   XML_SetUserData(parser, &status);
   XML_SetElementHandler(parser, _xml_start_status_element, _xml_end_status_element);
   if (!XML_Parse(parser, data, len, 1)) {
@@ -222,4 +289,21 @@ int xml_status(char* data, size_t len) {
 
   XML_ParserFree(parser);
   return status == STATUS_OK ? GS_OK : GS_ERROR;
+}
+
+void xml_free_applist(PAPP_LIST app_list) {
+  while (app_list != NULL) {
+    PAPP_LIST next = app_list->next;
+    free(app_list->name);
+    free(app_list);
+    app_list = next;
+  }
+}
+
+void xml_free_modelist(PDISPLAY_MODE mode_list) {
+  while (mode_list != NULL) {
+    PDISPLAY_MODE next = mode_list->next;
+    free(mode_list);
+    mode_list = next;
+  }
 }

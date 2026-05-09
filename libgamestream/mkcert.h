@@ -29,4 +29,4 @@ typedef struct _CERT_KEY_PAIR {
 
 CERT_KEY_PAIR mkcert_generate();
 void mkcert_free(CERT_KEY_PAIR);
-void mkcert_save(const char* certFile, const char* p12File, const char* keyPairFile, CERT_KEY_PAIR certKeyPair);
+int mkcert_save(const char* certFile, const char* p12File, const char* keyPairFile, CERT_KEY_PAIR certKeyPair);

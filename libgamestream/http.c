@@ -22,21 +22,42 @@
 
 #include <curl/curl.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static CURL *curl;
 static uint32_t connection_timeout_s = 60;
 static int log_level = 0;
+static volatile bool request_cancelled = false;
+
+static int _curl_xferinfo(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                          curl_off_t ultotal, curl_off_t ulnow) {
+    (void)clientp;
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    return request_cancelled ? 1 : 0;
+}
 
 static size_t _write_curl(void *contents, size_t size, size_t nmemb,
                           void *userp) {
     size_t realsize = size * nmemb;
     PHTTP_DATA mem = (PHTTP_DATA)userp;
 
-    mem->memory = realloc(mem->memory, mem->size + realsize + 1);
-    if (mem->memory == NULL)
+    if (mem == NULL || realsize > SIZE_MAX - mem->size - 1) {
         return 0;
+    }
 
+    char *new_memory = realloc(mem->memory, mem->size + realsize + 1);
+    if (new_memory == NULL) {
+        gs_error = "Not enough memory for HTTP response";
+        return 0;
+    }
+
+    mem->memory = new_memory;
     memcpy(&(mem->memory[mem->size]), contents, realsize);
     mem->size += realsize;
     mem->memory[mem->size] = 0;
@@ -45,9 +66,11 @@ static size_t _write_curl(void *contents, size_t size, size_t nmemb,
 }
 
 int http_init(const char *keyDirectory, int logLevel) {
-    curl = curl_easy_init();
-    if (!curl)
-        return GS_FAILED;
+    if (curl == NULL) {
+        curl = curl_easy_init();
+        if (!curl)
+            return GS_FAILED;
+    }
 
     char certificateFilePath[4096];
     snprintf(certificateFilePath, sizeof(certificateFilePath), "%s/%s",
@@ -69,7 +92,14 @@ int http_init(const char *keyDirectory, int logLevel) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _write_curl);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_SESSIONID_CACHE, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, _curl_xferinfo);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connection_timeout_s);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, connection_timeout_s);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, connection_timeout_s);
     curl_easy_setopt(curl, CURLOPT_VERBOSE, log_level > 0 ? 1L : 0);
 
     return GS_OK;
@@ -81,10 +111,20 @@ void http_set_timeout_s(uint32_t connection_timeout_in) {
 
 void http_set_log_level(int log_level_in) { log_level = log_level_in; }
 
+void http_set_cancelled(bool cancelled) { request_cancelled = cancelled; }
+
 int http_request(char *url, PHTTP_DATA data) {
+    if (curl == NULL || url == NULL || data == NULL) {
+        gs_error = "HTTP client is not initialized";
+        return GS_FAILED;
+    }
+
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, data);
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connection_timeout_s);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, connection_timeout_s);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, connection_timeout_s);
     curl_easy_setopt(curl, CURLOPT_VERBOSE, log_level > 0 ? 1L : 0);
 #ifdef __FreeBSD__
     curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1);
@@ -97,17 +137,23 @@ int http_request(char *url, PHTTP_DATA data) {
     if (data->size > 0) {
         free(data->memory);
         data->memory = malloc(1);
-        if (data->memory == NULL)
+        if (data->memory == NULL) {
+            gs_error = "Not enough memory for HTTP response";
             return GS_OUT_OF_MEMORY;
+        }
 
+        data->memory[0] = 0;
         data->size = 0;
     }
     CURLcode res = curl_easy_perform(curl);
 
     if (res != CURLE_OK) {
-        gs_error = curl_easy_strerror(res);
+        gs_error = request_cancelled && res == CURLE_ABORTED_BY_CALLBACK
+                       ? "Request cancelled"
+                       : curl_easy_strerror(res);
         return GS_FAILED;
     } else if (data->memory == NULL) {
+        gs_error = "Not enough memory for HTTP response";
         return GS_OUT_OF_MEMORY;
     }
 
@@ -118,7 +164,16 @@ int http_request(char *url, PHTTP_DATA data) {
     return GS_OK;
 }
 
-void http_cleanup() { curl_easy_cleanup(curl); }
+void http_cleanup() {
+#ifdef __3DS__
+    request_cancelled = false;
+#else
+    if (curl != NULL) {
+        curl_easy_cleanup(curl);
+        curl = NULL;
+    }
+#endif
+}
 
 PHTTP_DATA http_create_data() {
     PHTTP_DATA data = malloc(sizeof(HTTP_DATA));
@@ -130,6 +185,7 @@ PHTTP_DATA http_create_data() {
         free(data);
         return NULL;
     }
+    data->memory[0] = 0;
     data->size = 0;
 
     return data;

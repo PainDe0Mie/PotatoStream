@@ -36,6 +36,7 @@ static inline void SHA256(const unsigned char *d, size_t l, unsigned char *md) {
 static inline void SHA1(const unsigned char *d, size_t l, unsigned char *md) { if(md) memset(md, 0, 20); }
 static inline int RAND_bytes(unsigned char *buf, int num) { return 1; }
 static inline void* OPENSSL_malloc(size_t size) { return malloc(size); }
+static inline void OPENSSL_free(void* ptr) { free(ptr); }
 
 // Digest Sign
 static inline EVP_MD_CTX* EVP_MD_CTX_create() { return (EVP_MD_CTX*)1; }
@@ -118,17 +119,17 @@ static inline ASN1_TIME* ASN1_STRING_dup(ASN1_TIME* t) { return (ASN1_TIME*)1; }
 static inline void X509_set1_notBefore(X509* x, ASN1_TIME* t) {}
 static inline void X509_set1_notAfter(X509* x, ASN1_TIME* t) {}
 static inline void ASN1_STRING_free(ASN1_TIME* t) {}
-static inline void X509_set_pubkey(X509* x, EVP_PKEY* p) {}
+static inline int X509_set_pubkey(X509* x, EVP_PKEY* p) { return 1; }
 static inline X509_NAME* X509_get_subject_name(X509* x) { return (X509_NAME*)1; }
 static inline int X509_NAME_add_entry_by_txt(X509_NAME* n, const char* cid, int type, const unsigned char* value, int len, int day, int year) { return 1; }
-static inline void X509_set_issuer_name(X509* x, X509_NAME* n) {}
+static inline int X509_set_issuer_name(X509* x, X509_NAME* n) { return 1; }
 static inline int X509_sign(X509* x, EVP_PKEY* p, void* md) { return 1; }
 
-static inline const ASN1_BIT_STRING* X509_get0_signature(X509* x, void* p, void* cert) { 
+static inline void X509_get0_signature(const ASN1_BIT_STRING** sig, void* p, X509* x) { 
     static ASN1_BIT_STRING mock_sig;
     static unsigned char mock_data[128];
     mock_sig.length = 64;
     mock_sig.data = mock_data;
-    return &mock_sig; 
+    if (sig) *sig = &mock_sig;
 }
 #endif

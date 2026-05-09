@@ -20,6 +20,10 @@
 
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _APP_LIST {
   char* name;
   int id;
@@ -37,3 +41,9 @@ int xml_search(char* data, size_t len, char* node, char** result);
 int xml_applist(char* data, size_t len, PAPP_LIST *app_list);
 int xml_modelist(char* data, size_t len, PDISPLAY_MODE *mode_list);
 int xml_status(char* data, size_t len);
+void xml_free_applist(PAPP_LIST app_list);
+void xml_free_modelist(PDISPLAY_MODE mode_list);
+
+#ifdef __cplusplus
+}
+#endif
