@@ -19,21 +19,30 @@
 
 #include <algorithm>
 #include <cctype>
+#include <errno.h>
 #include <fstream>
 #include <locale>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "pair_record.hpp"
 
 static FILE *open_pair_record_for_write() {
+    mkdir(STREAMPOTATO_3DS_PATH, 0775);
     FILE *fd = fopen(STREAMPOTATO_3DS_PATH "/paired", "w");
     if (fd != NULL) {
         return fd;
     }
+    mkdir(LEGACY_MOONLIGHT_3DS_PATH, 0775);
     return fopen(LEGACY_MOONLIGHT_3DS_PATH "/paired", "w");
+}
+
+static FILE *open_confirmed_pair_record_for_write() {
+    mkdir(STREAMPOTATO_3DS_PATH, 0775);
+    return fopen(STREAMPOTATO_3DS_PATH "/paired_confirmed", "w");
 }
 
 static std::vector<std::string> read_pair_records(const char *path,
@@ -48,9 +57,64 @@ static std::vector<std::string> read_pair_records(const char *path,
     std::string line;
     while (std::getline(pair_file, line)) {
         trim(line);
+        if (line.empty()) {
+            continue;
+        }
         addresses.push_back(line);
     }
     return addresses;
+}
+
+static std::string format_pair_address(std::string address, uint16_t port) {
+    trim(address);
+    return address + ":" + std::to_string(port);
+}
+
+static void add_record(const char *path, FILE *(*open_for_write)(),
+                       std::string entry) {
+    trim(entry);
+    bool opened = false;
+    auto address_list = read_pair_records(path, &opened);
+    for (auto existing : address_list) {
+        trim(existing);
+        if (existing == entry) {
+            return;
+        }
+    }
+    address_list.push_back(entry);
+
+    remove(path);
+
+    FILE *fd = open_for_write();
+    if (fd == NULL) {
+        return;
+    }
+    for (auto addr_string : address_list) {
+        trim(addr_string);
+        fprintf(fd, "%s\n", addr_string.c_str());
+    }
+    fclose(fd);
+}
+
+static void remove_record(const char *path, FILE *(*open_for_write)(),
+                          std::string entry) {
+    bool opened = false;
+    auto address_list = read_pair_records(path, &opened);
+    trim(entry);
+
+    remove(path);
+
+    FILE *fd = open_for_write();
+    if (fd == NULL) {
+        return;
+    }
+    for (auto addr_string : address_list) {
+        trim(addr_string);
+        if (addr_string != entry) {
+            fprintf(fd, "%s\n", addr_string.c_str());
+        }
+    }
+    fclose(fd);
 }
 
 // trim from start (in place)
@@ -75,9 +139,8 @@ void trim(std::string &s) {
 }
 
 void add_pair_address(std::string address, uint16_t port) {
-    address += ":" + std::to_string(port);
+    address = format_pair_address(address, port);
 
-    // Prevent duplicates
     auto address_list = list_paired_addresses();
     for (auto entry : address_list) {
         if (entry == address) {
@@ -101,9 +164,12 @@ void add_pair_address(std::string address, uint16_t port) {
 }
 
 void remove_pair_address(std::string address, uint16_t port) {
-    address += ":" + std::to_string(port);
+    remove_pair_address_entry(format_pair_address(address, port));
+}
 
+void remove_pair_address_entry(std::string address) {
     auto address_list = list_paired_addresses();
+    trim(address);
 
     remove(STREAMPOTATO_3DS_PATH "/paired");
     remove(LEGACY_MOONLIGHT_3DS_PATH "/paired");
@@ -119,6 +185,52 @@ void remove_pair_address(std::string address, uint16_t port) {
         }
     }
     fclose(fd);
+
+    remove_confirmed_pair_entry(address);
+}
+
+bool is_saved_pair_address(std::string address, uint16_t port) {
+    const std::string entry = format_pair_address(address, port);
+    auto address_list = list_paired_addresses();
+    for (auto addr_string : address_list) {
+        trim(addr_string);
+        if (addr_string == entry) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void add_confirmed_pair(std::string address, uint16_t port) {
+    add_record(STREAMPOTATO_3DS_PATH "/paired_confirmed",
+               open_confirmed_pair_record_for_write,
+               format_pair_address(address, port));
+}
+
+void remove_confirmed_pair(std::string address, uint16_t port) {
+    remove_confirmed_pair_entry(format_pair_address(address, port));
+}
+
+void remove_confirmed_pair_entry(std::string address) {
+    remove_record(STREAMPOTATO_3DS_PATH "/paired_confirmed",
+                  open_confirmed_pair_record_for_write, address);
+}
+
+bool is_confirmed_pair(std::string address, uint16_t port) {
+    const std::string entry = format_pair_address(address, port);
+    bool opened = false;
+    auto confirmed =
+        read_pair_records(STREAMPOTATO_3DS_PATH "/paired_confirmed", &opened);
+    if (!opened) {
+        return false;
+    }
+    for (auto confirmed_entry : confirmed) {
+        trim(confirmed_entry);
+        if (confirmed_entry == entry) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::vector<std::string> list_paired_addresses() {

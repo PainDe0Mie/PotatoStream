@@ -33,5 +33,11 @@
 void trim(std::string &s);
 void add_pair_address(std::string address, uint16_t port);
 void remove_pair_address(std::string address, uint16_t port);
+void remove_pair_address_entry(std::string address);
+bool is_saved_pair_address(std::string address, uint16_t port);
+void add_confirmed_pair(std::string address, uint16_t port);
+void remove_confirmed_pair(std::string address, uint16_t port);
+void remove_confirmed_pair_entry(std::string address);
+bool is_confirmed_pair(std::string address, uint16_t port);
 std::vector<std::string> list_paired_addresses();
 #endif
