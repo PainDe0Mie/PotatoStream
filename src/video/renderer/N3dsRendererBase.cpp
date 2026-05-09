@@ -56,9 +56,15 @@ N3dsRendererBase::~N3dsRendererBase() {
     vramFree(vramFb);
     vramFree(vramTex);
 
-    // Clear target screen
+    bool was_3d_top = screen == GFX_TOP && gfxIs3D();
+    int clear_width = was_3d_top ? surface_width / 2 : surface_width;
     u8 *framebuf = gfxGetFramebuffer(screen, GFX_LEFT, NULL, NULL);
-    memset(framebuf, 0, surface_width * surface_height * px_size);
+    memset(framebuf, 0, clear_width * surface_height * px_size);
+    if (was_3d_top) {
+        u8 *right_framebuf = gfxGetFramebuffer(screen, GFX_RIGHT, NULL, NULL);
+        memset(right_framebuf, 0, clear_width * surface_height * px_size);
+        gfxSet3D(false);
+    }
     gfxScreenSwapBuffers(screen, true);
 
     // Return to the default display width before exiting
@@ -139,6 +145,9 @@ void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
     // significantly faster than the decoder.
 
     // Tile the source image into the scratch buffer.
+    GSPGPU_FlushDataCache(
+        source,
+        static_cast<u32>(source_stride_px * source_buffer_height * px_size));
     GX_DisplayTransfer(
         (u32 *)source,
         GX_BUFFER_DIM(source_stride_px, source_buffer_height),
