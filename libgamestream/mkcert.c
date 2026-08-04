@@ -28,6 +28,14 @@ static const int NUM_BITS = 2048;
 static const int SERIAL = 0;
 static const int NUM_YEARS = 10;
 
+// The 3DS RTC drifts and is often minutes or hours away from the host clock, so
+// a notBefore taken straight from the console lands in the host's future. Since
+// v2026.516.143833 Sunshine rejects a client certificate that is not yet valid
+// instead of silently accepting it, which fails every https request (applist,
+// launch) while plain http pairing still succeeds. Backdate notBefore so clock
+// skew cannot produce a certificate the host refuses at the TLS layer.
+static const long CLOCK_SKEW_MARGIN_SECONDS = 60L * 60L * 24L * 365L;
+
 int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years);
 
 CERT_KEY_PAIR mkcert_generate() {
@@ -111,7 +119,7 @@ int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years) {
     X509_set_version(cert, 2);
     ASN1_INTEGER_set(X509_get_serialNumber(cert), serial);
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
-    X509_gmtime_adj(X509_get_notBefore(cert), 0);
+    X509_gmtime_adj(X509_get_notBefore(cert), -CLOCK_SKEW_MARGIN_SECONDS);
     X509_gmtime_adj(X509_get_notAfter(cert), 60 * 60 * 24 * 365 * years);
 #else
     ASN1_TIME* before = ASN1_STRING_dup(X509_get0_notBefore(cert));
@@ -122,7 +130,7 @@ int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years) {
         goto err;
     }
 
-    X509_gmtime_adj(before, 0);
+    X509_gmtime_adj(before, -CLOCK_SKEW_MARGIN_SECONDS);
     X509_gmtime_adj(after, 60 * 60 * 24 * 365 * years);
 
     X509_set1_notBefore(cert, before);
