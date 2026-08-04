@@ -216,6 +216,10 @@ void remove_confirmed_pair_entry(std::string address) {
                   open_confirmed_pair_record_for_write, address);
 }
 
+void clear_confirmed_pairs() {
+    remove(STREAMPOTATO_3DS_PATH "/paired_confirmed");
+}
+
 bool is_confirmed_pair(std::string address, uint16_t port) {
     const std::string entry = format_pair_address(address, port);
     bool opened = false;
