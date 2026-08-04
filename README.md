@@ -9,6 +9,12 @@ Compatible with [Sunshine](https://github.com/LizardByte/Sunshine) (open-source,
 
 > The original project targets the *New* 3DS and its hardware MVD decoder. PotatoStream keeps full New 3DS support while adding a dedicated Potato mode for older hardware: ARM11 compiler optimizations, smart frame skipping, auto-configured stream profile, and native Y2RU video pipeline.
 
+## Support
+
+For any problem, question or bug report, please go through the Discord - you will get a much faster answer there than through GitHub issues:
+
+**[discord.gg/bgHwErJUtp](https://discord.gg/bgHwErJUtp)**
+
 ---
 
 ## Why PotatoStream?
