@@ -175,6 +175,14 @@ void http_cleanup() {
 #endif
 }
 
+void http_shutdown() {
+    request_cancelled = false;
+    if (curl != NULL) {
+        curl_easy_cleanup(curl);
+        curl = NULL;
+    }
+}
+
 PHTTP_DATA http_create_data() {
     PHTTP_DATA data = malloc(sizeof(HTTP_DATA));
     if (data == NULL)

@@ -39,6 +39,7 @@ int http_init(const char *keyDirectory, int logLevel);
 PHTTP_DATA http_create_data();
 int http_request(char *url, PHTTP_DATA data);
 void http_cleanup();
+void http_shutdown();
 void http_free_data(PHTTP_DATA data);
 void http_set_timeout_s(uint32_t connection_timeout_in);
 void http_set_log_level(int log_level_in);
