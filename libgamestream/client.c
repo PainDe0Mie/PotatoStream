@@ -61,6 +61,10 @@ static EVP_PKEY *privateKey;
 
 const char* gs_error;
 
+static char pair_error_buffer[256];
+
+static bool cert_regenerated;
+
 #define LEN_AS_HEX_STR(x) ((x) * 2 + 1)
 #define SIZEOF_AS_HEX_STR(x) LEN_AS_HEX_STR(sizeof(x))
 
@@ -154,6 +158,7 @@ static int load_cert(const char* keyDirectory) {
       return GS_FAILED;
     }
     mkcert_free(cert);
+    cert_regenerated = true;
     fd = fopen(certificateFilePath, "r");
   }
 
@@ -354,10 +359,6 @@ static int load_server_status(PSERVER_DATA server) {
   if (!server->isNvidiaSoftware)
     return GS_OK;
 
-  // Modern GFE versions don't allow serverinfo to be fetched over HTTPS if the client
-  // is not already paired. Since we can't pair without knowing the server version, we
-  // make another request over HTTP if the HTTPS request fails. We can't just use HTTP
-  // for everything because it doesn't accurately tell us if we're paired.
   ret = GS_INVALID;
   for (i = 0; i < 2 && ret != GS_OK; i++) {
     ret = load_serverinfo(server, i == 0);
@@ -883,8 +884,14 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   server->paired = true;
 
   cleanup:
-  if (ret != GS_OK && (gs_error == NULL || gs_error[0] == '\0'))
-    gs_error = pair_stage;
+  if (ret != GS_OK) {
+    if (gs_error != NULL && gs_error[0] != '\0' && gs_error != pair_stage)
+      snprintf(pair_error_buffer, sizeof(pair_error_buffer), "%s (%s)",
+               pair_stage, gs_error);
+    else
+      snprintf(pair_error_buffer, sizeof(pair_error_buffer), "%s", pair_stage);
+    gs_error = pair_error_buffer;
+  }
   const char *pair_error = gs_error;
 
   if (ret != GS_OK && server != NULL) {
@@ -1064,6 +1071,10 @@ int gs_quit_app(PSERVER_DATA server) {
 
   http_free_data(data);
   return ret;
+}
+
+bool gs_cert_was_regenerated() {
+  return cert_regenerated;
 }
 
 int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const char *keyDirectory, int log_level, bool unsupported) {
