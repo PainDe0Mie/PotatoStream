@@ -1,10 +1,8 @@
 // potato_sw_video.cpp
-// Pipeline vidéo soft-decode optimisé Old 3DS/2DS
-// Basé sur n3ds_video_soft.cpp mais avec :
 //   - frame skip intelligent (potato_profile)
 //   - stats perf
-//   - Y2RU hardware (dispo sur ALL 3DS, pas seulement New)
-//   - pas de swscale (pas disponible via ffmpeg.h du projet)
+//   - Y2RU hardware
+//   - no swscale
 
 #include "potato_sw_video.h"
 
@@ -22,8 +20,6 @@
 #define N3DS_BUFFER_FRAMES 1
 
 static std::unique_ptr<PotatoVideoDecoder> instance = nullptr;
-
-// ─── Constructeur ─────────────────────────────────────────────────────────
 
 PotatoVideoDecoder::PotatoVideoDecoder(int videoFormat, int width, int height,
                                        int redrawRate, void *context, int drFlags)
@@ -46,7 +42,7 @@ PotatoVideoDecoder::PotatoVideoDecoder(int videoFormat, int width, int height,
     ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size,
                     INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
 
-    // Y2RU : hardware YUV->RGB disponible sur TOUTES les 3DS (Old et New)
+    // Y2RU : hardware YUV->RGB 
     if (y2rInit()) {
         fprintf(stderr, "[POTATO] y2rInit failed\n");
         throw std::runtime_error("y2rInit failed");
@@ -79,8 +75,6 @@ PotatoVideoDecoder::PotatoVideoDecoder(int videoFormat, int width, int height,
            (texture_width * texture_height * pixel_size) / 1024);
 }
 
-// ─── Destructeur ──────────────────────────────────────────────────────────
-
 PotatoVideoDecoder::~PotatoVideoDecoder() {
     ffmpeg_destroy();
     y2rExit();
@@ -88,8 +82,6 @@ PotatoVideoDecoder::~PotatoVideoDecoder() {
     potato_print_stats();
     printf("[POTATO] decoder shutdown\n");
 }
-
-// ─── Conversion YUV → RGB via Y2RU hardware ───────────────────────────────
 
 int PotatoVideoDecoder::_write_yuv_to_framebuffer(const u8 **source,
                                                    int width, int height,
@@ -123,26 +115,6 @@ int PotatoVideoDecoder::_write_yuv_to_framebuffer(const u8 **source,
     svcWaitSynchronization(conv_event, 10000000); // 10ms max
     svcCloseHandle(conv_event);
 
-    {
-        u64 elapsed_ticks = svcGetSystemTick() - t_start;
-        u64 elapsed_us    = (elapsed_ticks * 1000000ULL) / 268000000ULL;
-        potato_record_decode_ticks(elapsed_ticks);
-        decode_time_total += elapsed_us;
-        decode_count++;
-
-        // Warn si on dépasse le budget (41ms @ 24fps)
-        u64 budget_us = 1000000ULL / (u64)(g_potato.fps > 0 ? g_potato.fps : 24);
-        if (elapsed_us > budget_us) {
-            slow_frame_count++;
-            if ((slow_frame_count % 120) == 0) {
-                printf("[POTATO] slow frames: %lu, last=%llums, budget=%llums\n",
-                       (unsigned long)slow_frame_count,
-                       (unsigned long long)elapsed_us / 1000,
-                       (unsigned long long)budget_us / 1000);
-            }
-        }
-    }
-
     renderer_lock.lock();
     renderer->set_perf_decode_ticks(svcGetSystemTick() - t_start);
     renderer->write_px_to_framebuffer(rgb_img_buffer);
@@ -156,16 +128,36 @@ fail:
     return DR_OK;
 }
 
-// ─── Submit decode unit (appelé par Moonlight pour chaque frame) ───────────
+void PotatoVideoDecoder::_record_frame_cost(u64 frame_start_ticks) {
+    const u64 elapsed_ticks = svcGetSystemTick() - frame_start_ticks;
+    const u64 elapsed_us = (elapsed_ticks * 1000000ULL) / 268000000ULL;
+
+    potato_record_decode_ticks(elapsed_ticks);
+    decode_time_total += elapsed_us;
+    decode_count++;
+
+    const u64 budget_us =
+        1000000ULL / (u64)(g_potato.fps > 0 ? g_potato.fps : 24);
+    if (elapsed_us > budget_us) {
+        slow_frame_count++;
+        if ((slow_frame_count % 120) == 0) {
+            printf("[POTATO] slow frames: %lu, last=%llums, budget=%llums\n",
+                   (unsigned long)slow_frame_count,
+                   (unsigned long long)elapsed_us / 1000,
+                   (unsigned long long)budget_us / 1000);
+        }
+    }
+}
 
 int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
-    // Frame skip : si on est en retard, on droppe sans décoder
+    // Frame skip
     if (potato_should_skip_frame()) {
         potato_frame_skipped();
         return DR_OK;
     }
 
+    const u64 frame_start_ticks = svcGetSystemTick();
     PLENTRY entry = decodeUnit->bufferList;
     int length = 0;
 
@@ -179,21 +171,23 @@ int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
     }
 
     if (ffmpeg_decode((unsigned char *)ffmpeg_buffer, length) < 0) {
+        _record_frame_cost(frame_start_ticks);
         potato_frame_skipped();
-        return DR_OK;
+        return DR_NEED_IDR;
     }
 
     AVFrame *frame = ffmpeg_get_frame(false);
     if (!frame) {
+        _record_frame_cost(frame_start_ticks);
         potato_frame_skipped();
         return DR_OK;
     }
 
-    return _write_yuv_to_framebuffer(
+    const int result = _write_yuv_to_framebuffer(
         (const u8 **)frame->data, image_width, image_height, pixel_size);
+    _record_frame_cost(frame_start_ticks);
+    return result;
 }
-
-// ─── Callbacks C pour Moonlight ───────────────────────────────────────────
 
 static int potato_setup(int videoFormat, int width, int height, int redrawRate,
                         void *context, int drFlags) {
