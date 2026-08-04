@@ -151,7 +151,7 @@ int SoftVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
         entry = entry->next;
     }
     if (ffmpeg_decode((unsigned char *)ffmpeg_buffer, length) < 0) {
-        return DR_OK;
+        return DR_NEED_IDR;
     }
 
     AVFrame *frame = ffmpeg_get_frame(false);
