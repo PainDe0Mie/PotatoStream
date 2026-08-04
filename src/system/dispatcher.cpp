@@ -1,8 +1,6 @@
 #include "dispatcher.hpp"
 #include <algorithm>
 
-std::shared_ptr<MessageDispatcher> MessageDispatcher::instance = nullptr;
-
 MessageDispatcher::MessageDispatcher() {
     for (uint8_t i = 0; i < MessageType::MESSAGE_TYPE_COUNT; i++) {
         subscribers[static_cast<MessageType>(i)] = std::vector<ISubscriber *>();
@@ -39,15 +37,23 @@ void MessageDispatcher::unsubscribe(MessageType type, ISubscriber *sub) {
 }
 
 void MessageDispatcher::post_immediate(std::shared_ptr<IMessage> m) {
+    // Snapshot the subscriber list under the lock, then release.
+    // This prevents:
+    //   1. Deadlock if a subscriber calls post/subscribe/unsubscribe
+    //      from within accept() (reentrancy).
+    //   2. Iterator invalidation if a subscriber modifies the list
+    //      during dispatch.
+    //   3. Long lock hold times while accept() runs.
     subscriber_lock.lock();
-    std::vector<ISubscriber *> &sub_list = subscribers[m->getMessageType()];
-    for (ISubscriber *sub : sub_list) {
+    std::vector<ISubscriber *> snapshot = subscribers[m->getMessageType()];
+    subscriber_lock.unlock();
+
+    for (ISubscriber *sub : snapshot) {
         if (sub == nullptr) {
             continue;
         }
         sub->accept(m.get());
     }
-    subscriber_lock.unlock();
 }
 
 void MessageDispatcher::post(std::shared_ptr<IMessage> m) {
@@ -56,18 +62,16 @@ void MessageDispatcher::post(std::shared_ptr<IMessage> m) {
     message_lock.unlock();
 }
 
-bool MessageDispatcher::_is_queue_empty() {
-    message_lock.lock();
-    bool is_empty = message_queue.empty();
-    message_lock.unlock();
-    return is_empty;
-}
-
 void MessageDispatcher::dispatch_all() {
-    while (!_is_queue_empty()) {
-
+    // Single lock per message (not two like the original _is_queue_empty + pop)
+    while (true) {
+        std::shared_ptr<IMessage> m;
         message_lock.lock();
-        std::shared_ptr<IMessage> m = message_queue.front();
+        if (message_queue.empty()) {
+            message_lock.unlock();
+            break;
+        }
+        m = message_queue.front();
         message_queue.pop();
         message_lock.unlock();
 
