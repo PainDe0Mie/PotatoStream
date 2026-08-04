@@ -24,6 +24,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fstream>
 #include <getopt.h>
 #include <string>
@@ -71,6 +72,25 @@ static char *copy_config_string(const std::string &value) {
 
     memcpy(buffer, value.c_str(), value.size() + 1);
     return buffer;
+}
+
+static bool dir_has_any_file(const char *path) {
+    DIR *dir = opendir(path);
+    if (dir == NULL) {
+        return false;
+    }
+
+    bool found = false;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        found = true;
+        break;
+    }
+    closedir(dir);
+    return found;
 }
 
 void parse_argument(int c, char *value, PCONFIGURATION config) {
@@ -217,13 +237,16 @@ bool config_file_parse(PCONFIGURATION config) {
 bool config_save(const char *filename, PCONFIGURATION config) {
     if (strcmp(filename, STREAMPOTATO_CONFIG_PATH) == 0) {
         mkdir(STREAMPOTATO_3DS_PATH, 0775);
+        mkdir(STREAMPOTATO_3DS_PATH "/keys", 0775);
     } else if (strcmp(filename, LEGACY_MOONLIGHT_CONFIG_PATH) == 0) {
         mkdir(LEGACY_MOONLIGHT_3DS_PATH, 0775);
+        mkdir(LEGACY_MOONLIGHT_3DS_PATH "/keys", 0775);
     }
 
     FILE *fd = fopen(filename, "w");
     if (fd == NULL && strcmp(filename, STREAMPOTATO_CONFIG_PATH) == 0) {
         mkdir(LEGACY_MOONLIGHT_3DS_PATH, 0775);
+        mkdir(LEGACY_MOONLIGHT_3DS_PATH "/keys", 0775);
         fd = fopen(LEGACY_MOONLIGHT_CONFIG_PATH, "w");
     }
     if (fd == NULL) {
@@ -253,7 +276,7 @@ bool config_save(const char *filename, PCONFIGURATION config) {
     write_config_bool(fd, "stereoscopic_3d",
                       config->experimental_stereoscopic_3d);
 
-    if (strcmp(config->app, "Steam") != 0)
+    if (config->app != NULL && strcmp(config->app, "Steam") != 0)
         write_config_string(fd, "app", config->app);
 
     fclose(fd);
@@ -282,11 +305,12 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->viewonly = false;
     config->port = 47989;
 
-    if (access(STREAMPOTATO_3DS_PATH, F_OK) == 0) {
+    if (dir_has_any_file(STREAMPOTATO_3DS_PATH "/keys")) {
         strcpy(config->key_dir, STREAMPOTATO_3DS_PATH "/keys");
     } else {
         strcpy(config->key_dir, LEGACY_MOONLIGHT_3DS_PATH "/keys");
     }
+    mkdir(config->key_dir, 0775);
 
     config->stream.width = 800;
     config->stream.height = 480;
@@ -305,10 +329,6 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config_file_parse(config);
 
     if (config->stream.bitrate == -1) {
-        // This table prefers 16:10 resolutions because they are
-        // only slightly more pixels than the 16:9 equivalents, so
-        // we don't want to bump those 16:10 resolutions up to the
-        // next 16:9 slot.
 
         if (config->stream.width * config->stream.height <= 640 * 360) {
             config->stream.bitrate = (int)(1000 * (config->stream.fps / 30.0));
