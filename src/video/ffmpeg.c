@@ -105,9 +105,11 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     // Allow display of corrupt frames and frames missing references
     decoder_ctx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
     decoder_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
+
+    decoder_ctx->skip_loop_filter = AVDISCARD_ALL;
+
     if (perf_lvl & FAST_DECODE) {
       decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
-      decoder_ctx->skip_loop_filter = AVDISCARD_NONREF;
     }
     if (perf_lvl & VERY_FAST_DECODE) {
       decoder_ctx->skip_idct = AVDISCARD_NONREF;
@@ -134,6 +136,8 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
       avcodec_free_context(&decoder_ctx);
       continue;
     }
+    
+    break;
   }
 
   if (decoder == NULL) {
