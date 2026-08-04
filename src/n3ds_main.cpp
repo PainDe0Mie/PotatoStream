@@ -25,6 +25,7 @@
 #include "system/dispatcher.hpp"
 #include "system/n3ds_connection.hpp"
 #include "system/pair_record.hpp"
+#include "system/update_check.hpp"
 #include "video/video.hpp"
 
 #include <3ds.h>
@@ -36,6 +37,7 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <errno.h>
 #include <exception>
 #include <malloc.h>
 #include <netdb.h>
@@ -55,7 +57,20 @@
 // 0x40000 for each platform socket (2 sockets total)
 #define SOC_BUFFERSIZE 0x100000
 
-#define MAX_INPUT_CHAR 60
+struct NumericSetting {
+    const char *title;
+    int min_value;
+    int max_value;
+    int step;
+    int fast_step;
+};
+
+static const NumericSetting SETTING_WIDTH = {"Stream width", 160, 1920, 8, 80};
+static const NumericSetting SETTING_HEIGHT = {"Stream height", 120, 1200, 8, 60};
+static const NumericSetting SETTING_FPS = {"Stream FPS", 10, 120, 1, 10};
+static const NumericSetting SETTING_BITRATE = {"Bitrate (kbps)", 100, 50000, 100,
+                                               1000};
+static const NumericSetting SETTING_PACKET = {"Packet size", 256, 2048, 4, 128};
 
 static u32 *SOC_buffer = NULL;
 static bool g_ac_initialized = false;
@@ -142,6 +157,11 @@ static int start_app_task(void *ctx) {
                         task->localaudio, task->gamepad_mask);
 }
 
+static int update_check_task(void *context) {
+    *static_cast<UpdateCheckResult *>(context) = update_check_run();
+    return 0;
+}
+
 static int run_loading_task(const std::string &title, const std::string &body,
                             const std::string &status,
                             const std::string &footer_hint, int (*fn)(void *),
@@ -178,43 +198,6 @@ static int run_loading_task(const std::string &title, const std::string &body,
     threadJoin(worker, ~0ULL);
     threadFree(worker);
     return task.result;
-}
-
-static std::string prompt_for_text_input(const std::string &hint_text,
-                                         const std::string &initial_text,
-                                         SwkbdType keyboard_type,
-                                         int max_length, int input_length) {
-    wait_for_all_buttons_release();
-
-    const bool had_menu_ui = menu_ui_is_active();
-    if (had_menu_ui) {
-        menu_ui_shutdown();
-    }
-
-    std::vector<char> buffer(max_length + 1, '\0');
-    SwkbdState swkbd;
-    swkbdInit(&swkbd, keyboard_type,
-              keyboard_type == SWKBD_TYPE_NUMPAD ? 1 : 3, input_length);
-    if (!hint_text.empty()) {
-        swkbdSetHintText(&swkbd, hint_text.c_str());
-    }
-    if (!initial_text.empty()) {
-        swkbdSetInitialText(&swkbd, initial_text.c_str());
-    }
-    SwkbdButton button =
-        swkbdInputText(&swkbd, buffer.data(), static_cast<int>(buffer.size()));
-
-    if (had_menu_ui) {
-        menu_ui_init();
-    }
-
-    if (button != SWKBD_BUTTON_RIGHT) {
-        return "";
-    }
-
-    std::string text = buffer.data();
-    trim(text);
-    return text;
 }
 
 static void draw_stream_wait_screen(PCONFIGURATION config,
@@ -474,7 +457,16 @@ static int console_selection_prompt(std::string prompt,
         status = build_profile_status();
     }
 
+    if (options.empty()) {
+        return -1;
+    }
+
     int option_idx = default_idx;
+    if (option_idx < 0) {
+        option_idx = 0;
+    } else if ((size_t)option_idx >= options.size()) {
+        option_idx = (int)options.size() - 1;
+    }
     wait_for_all_buttons_release();
 
     while (aptMainLoop()) {
@@ -524,7 +516,7 @@ static int console_selection_prompt(std::string prompt,
             return -1;
         }
         if (kDown & KEY_DOWN) {
-            if ((size_t)option_idx < options.size() - 1) {
+            if ((size_t)(option_idx + 1) < options.size()) {
                 option_idx++;
             }
         } else if (kDown & KEY_UP) {
@@ -534,7 +526,7 @@ static int console_selection_prompt(std::string prompt,
         }
     }
 
-    exit(0);
+    return -1;
 }
 
 static std::string prompt_for_action(PSERVER_DATA server) {
@@ -571,22 +563,226 @@ static std::string prompt_for_action(PSERVER_DATA server) {
     return "pair";
 }
 
-static std::string prompt_for_address() {
-    auto address_list = list_paired_addresses();
-    address_list.push_back("Add new host");
-    int idx =
-        console_selection_prompt("Select a host", address_list, 0,
-                                 "Choose a paired PC or add a direct IP.",
-                                 build_profile_status());
-    if (idx < 0) {
-        return "";
-    } else if (address_list[idx] != "Add new host") {
-        return address_list[idx];
+static int prompt_for_number(const NumericSetting &setting, int value) {
+    wait_for_all_buttons_release();
+
+    if (value < setting.min_value) {
+        value = setting.min_value;
+    } else if (value > setting.max_value) {
+        value = setting.max_value;
     }
 
-    // Prompt users for a custom address
-    return prompt_for_text_input("Address of host to connect to", "",
-                                 SWKBD_TYPE_NORMAL, MAX_INPUT_CHAR - 1, -1);
+    const int initial_value = value;
+    int hold_counter = 0;
+    int last_dir = 0;  // 0=none, 1=up, 2=down, 3=right, 4=left
+
+    char range_hint[96];
+    snprintf(range_hint, sizeof(range_hint), "Allowed range: %d - %d",
+             setting.min_value, setting.max_value);
+    char footer_hint[128];
+    snprintf(footer_hint, sizeof(footer_hint),
+             "Up/Down: +-%d   Left/Right: +-%d   A: confirm   B: cancel",
+             setting.step, setting.fast_step);
+
+    while (aptMainLoop()) {
+        if (menu_ui_is_active()) {
+            menu_ui_draw_number_editor(setting.title,
+                                       "Hold a direction to change faster.",
+                                       std::to_string(value), range_hint,
+                                       build_profile_status(), footer_hint);
+        } else {
+            gfxSwapBuffers();
+            gfxFlushBuffers();
+        }
+        gspWaitForVBlank();
+
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        u32 kHeld = hidKeysHeld();
+
+        if (kDown & KEY_A) {
+            return value;
+        }
+        if (kDown & KEY_B) {
+            return initial_value;
+        }
+
+        int cur_dir = 0;
+        if (kHeld & KEY_UP) cur_dir = 1;
+        else if (kHeld & KEY_DOWN) cur_dir = 2;
+        else if (kHeld & KEY_RIGHT) cur_dir = 3;
+        else if (kHeld & KEY_LEFT) cur_dir = 4;
+
+        if (cur_dir == 0) {
+            hold_counter = 0;
+            last_dir = 0;
+            continue;
+        }
+
+        if (cur_dir != last_dir) {
+            hold_counter = 0;
+            last_dir = cur_dir;
+        } else {
+            hold_counter++;
+        }
+
+        const bool trigger =
+            (kDown & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) ||
+            (hold_counter > 20 && (hold_counter % 4 == 0));
+        if (!trigger) {
+            continue;
+        }
+
+        switch (cur_dir) {
+        case 1: value += setting.step; break;
+        case 2: value -= setting.step; break;
+        case 3: value += setting.fast_step; break;
+        case 4: value -= setting.fast_step; break;
+        }
+
+        if (value < setting.min_value) {
+            value = setting.min_value;
+        } else if (value > setting.max_value) {
+            value = setting.max_value;
+        }
+    }
+
+    return initial_value;
+}
+
+static std::string prompt_for_ip_address() {
+    wait_for_all_buttons_release();
+
+    int octets[4] = {192, 168, 1, 1};
+    int selected = 0;
+    int hold_counter = 0;
+    int last_dir = 0;  // 0=none, 1=up, 2=down, 3=left, 4=right
+
+    while (aptMainLoop()) {
+        if (menu_ui_is_active()) {
+            menu_ui_draw_ip_picker(
+                "Enter host IP",
+                "Up/Down: change value   Left/Right: switch octet",
+                octets, selected,
+                build_profile_status(),
+                "D-Pad: move   A: confirm   B: back");
+        } else {
+            gfxSwapBuffers();
+            gfxFlushBuffers();
+        }
+        gspWaitForVBlank();
+
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        u32 kHeld = hidKeysHeld();
+
+        if (kDown & KEY_A) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d.%d.%d.%d",
+                     octets[0], octets[1], octets[2], octets[3]);
+            return buf;
+        }
+        if (kDown & KEY_B) {
+            return "";
+        }
+
+        // Determine current direction (only one at a time, up has priority)
+        int cur_dir = 0;
+        if (kHeld & KEY_UP) cur_dir = 1;
+        else if (kHeld & KEY_DOWN) cur_dir = 2;
+        else if (kHeld & KEY_LEFT) cur_dir = 3;
+        else if (kHeld & KEY_RIGHT) cur_dir = 4;
+
+        if (cur_dir == 0) {
+            hold_counter = 0;
+            last_dir = 0;
+        } else {
+            if (cur_dir != last_dir) {
+                hold_counter = 0;
+                last_dir = cur_dir;
+            } else {
+                hold_counter++;
+            }
+
+            // Trigger on initial press, then auto-repeat after ~20 frames
+            // (about 0.33s) at a rate of once every 4 frames (~15/s).
+            bool trigger = (kDown & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) ||
+                           (hold_counter > 20 && (hold_counter % 4 == 0));
+
+            if (trigger) {
+                switch (cur_dir) {
+                case 1: octets[selected] = (octets[selected] + 1) % 256; break;
+                case 2: octets[selected] = (octets[selected] + 255) % 256; break;
+                case 3: selected = (selected + 3) % 4; break;
+                case 4: selected = (selected + 1) % 4; break;
+                }
+            }
+        }
+    }
+    return "";
+}
+
+static std::string prompt_for_address(bool *should_exit) {
+    *should_exit = false;
+
+   while (aptMainLoop()) {
+        auto paired = list_paired_addresses();
+        std::vector<std::string> options = paired;
+        options.push_back("Add new host");
+        if (!paired.empty()) {
+            options.push_back("Remove host");
+        }
+        options.push_back("Exit");
+
+        int idx = console_selection_prompt(
+            "Select a host", options, 0,
+            "Choose a paired PC or add a direct IP.",
+            build_profile_status());
+        if (idx < 0) {
+            return "";
+        }
+
+        if (idx < (int)paired.size()) {
+            return paired[idx];
+        }
+
+        if (options[idx] == "Exit") {
+            *should_exit = true;
+            return "";
+        }
+
+        if (options[idx] == "Add new host") {
+            return prompt_for_ip_address();
+        }
+
+        if (options[idx] == "Remove host") {
+            int ridx = console_selection_prompt(
+                "Remove host", paired, 0,
+                "Select a host to forget.",
+                build_profile_status());
+            if (ridx < 0) {
+                continue; 
+            }
+
+            std::string host = paired[ridx];
+            std::string addr = host;
+            unsigned short port = 47989;
+            size_t pos = host.find(':');
+            if (pos != std::string::npos) {
+                addr = host.substr(0, pos);
+                std::string port_str = host.substr(pos + 1);
+                errno = 0;
+                long p = strtol(port_str.c_str(), nullptr, 10);
+                if (errno == 0 && p > 0 && p <= 65535) {
+                    port = (unsigned short)p;
+                }
+            }
+            remove_pair_address(addr.c_str(), port);
+        }
+    }
+
+    *should_exit = true;
+    return "";
 }
 
 static VIDEO_DECODER_TYPE
@@ -619,20 +815,6 @@ static bool prompt_for_boolean(std::string prompt, bool default_val) {
     return idx == 0;
 }
 
-static int prompt_for_int(std::string initial_text) {
-    std::string setting_str =
-        prompt_for_text_input("", initial_text, SWKBD_TYPE_NUMPAD,
-                              MAX_INPUT_CHAR - 1, 8);
-    if (setting_str.empty()) {
-        return std::stoi(initial_text);
-    }
-
-    try {
-        return std::stoi(setting_str);
-    } catch (...) {
-        return std::stoi(initial_text);
-    }
-}
 
 static void prompt_for_stream_settings(PCONFIGURATION config) {
     std::vector<std::string> setting_keys = {
@@ -702,22 +884,22 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
 
         if ("width" == setting_keys[idx]) {
             config->stream.width =
-                prompt_for_int(std::to_string(config->stream.width));
+                prompt_for_number(SETTING_WIDTH, config->stream.width);
         } else if ("height" == setting_keys[idx]) {
             config->stream.height =
-                prompt_for_int(std::to_string(config->stream.height));
+                prompt_for_number(SETTING_HEIGHT, config->stream.height);
         } else if ("motion_controls" == setting_keys[idx]) {
             config->motion_controls = prompt_for_boolean(
                 "Enable Motion Controls", config->motion_controls);
         } else if ("fps" == setting_keys[idx]) {
             config->stream.fps =
-                prompt_for_int(std::to_string(config->stream.fps));
+                prompt_for_number(SETTING_FPS, config->stream.fps);
         } else if ("bitrate" == setting_keys[idx]) {
             config->stream.bitrate =
-                prompt_for_int(std::to_string(config->stream.bitrate));
+                prompt_for_number(SETTING_BITRATE, config->stream.bitrate);
         } else if ("packetsize" == setting_keys[idx]) {
             config->stream.packetSize =
-                prompt_for_int(std::to_string(config->stream.packetSize));
+                prompt_for_number(SETTING_PACKET, config->stream.packetSize);
         } else if ("sops" == setting_keys[idx]) {
             config->sops = prompt_for_boolean(
                 "Optimize Game settings for streaming", config->sops);
@@ -799,6 +981,24 @@ static void init_3ds() {
     aptInit();
     g_apt_initialized = true;
 
+    // ============================================================
+    // 3DS optimization: claim the system core (core 1)
+    // ============================================================
+    // By default only core 0 (appcore) is usable. Core 1 exists on
+    // EVERY 3DS model (Old and New alike) but stays off-limits until
+    // we explicitly ask for a time slice on it. Without this call,
+    // decode (CPU) and GPU submission both fight for the same single
+    // core, which is exactly why the video pipeline is fully serial
+    // today. 30% is the conservative value most homebrew use; it
+    // still leaves plenty of headroom for OS/background services.
+    // This does NOT require the New3DS-exclusive core 2/3 exheader
+    // flags, so it's safe on Old 3DS/2DS too.
+    Result cpu_limit_status = APT_SetAppCpuTimeLimit(30);
+    if (R_FAILED(cpu_limit_status)) {
+        printf("Warning: APT_SetAppCpuTimeLimit failed: %08lX\n",
+               cpu_limit_status);
+    }
+
     SOC_buffer = (u32 *)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
     status = socInit(SOC_buffer, SOC_BUFFERSIZE);
     if (R_FAILED(status)) {
@@ -829,13 +1029,25 @@ static int prompt_for_app_id(PSERVER_DATA server) {
     AppListTaskContext task_context = {
         .server = server,
     };
-    int status = run_loading_task("Loading apps",
-                                  "Fetching the host application list.",
-                                  build_profile_status(),
-                                  "Querying the paired host", app_list_task,
-                                  &task_context);
+    int status = run_loading_task(
+        "Loading apps",
+        "Fetching the host application list. If this never finishes, restart "
+        "Sunshine on the host: it stops answering this port once a connection "
+        "is left open.",
+        build_profile_status(), "Querying the paired host", app_list_task,
+        &task_context);
     if (status != GS_OK || task_context.list == NULL) {
-        wait_for_button("Unable to load the host app list.");
+        char buffer[420];
+        snprintf(buffer, sizeof(buffer),
+                 "Unable to load the host app list from %s:%u (https): %s. "
+                 "Restart Sunshine on the host first, it is the usual cause. "
+                 "If the host forgot this console, pick Unpair host and pair "
+                 "again.",
+                 server->serverInfo.address != NULL ? server->serverInfo.address
+                                                    : "host",
+                 server->httpsPort,
+                 gs_error != NULL ? gs_error : "unknown error");
+        wait_for_button(buffer);
         return -1;
     }
 
@@ -1043,6 +1255,13 @@ static int init_server(CONFIGURATION *config, SERVER_DATA *server) {
     int status = gs_init(server, config->address, config->port, config->key_dir,
                          0, config->unsupported);
     http_set_timeout_s(60);
+
+    // A regenerated certificate is unknown to every host we used to be paired
+    // with, so the recorded pairings no longer describe reality.
+    if (gs_cert_was_regenerated()) {
+        clear_confirmed_pairs();
+    }
+
     if (status == GS_OUT_OF_MEMORY) {
         printf("Not enough memory\n");
         return 1;
@@ -1066,6 +1285,16 @@ static int init_server(CONFIGURATION *config, SERVER_DATA *server) {
            server->serverInfo.serverInfoAppVersion);
     printf("Server codec flags: 0x%x\n",
            server->serverInfo.serverCodecModeSupport);
+
+    // Sunshine answers PairStatus 0 on plain http whatever the real state, and
+    // its https endpoint is the only one that tells the truth. Querying it here
+    // costs a tls handshake the 3DS does not complete in time, so the pairing we
+    // recorded when it succeeded is what we go by. GFE reports it correctly over
+    // https during gs_init, so it keeps the authoritative answer.
+    if (!server->paired && !server->isNvidiaSoftware &&
+        is_confirmed_pair(config->address, config->port)) {
+        server->paired = true;
+    }
 
     if (server->paired) {
         add_pair_address(config->address, config->port);
@@ -1103,8 +1332,15 @@ static void action_pair(CONFIGURATION *config, SERVER_DATA *server) {
     http_set_timeout_s(90);
 
     char pin[5];
-    sprintf(pin, "%d%d%d%d", (unsigned)random() % 10, (unsigned)random() % 10,
-            (unsigned)random() % 10, (unsigned)random() % 10);
+    unsigned char pin_bytes[4];
+    if (RAND_bytes(pin_bytes, sizeof(pin_bytes)) == 1) {
+        snprintf(pin, sizeof(pin), "%u%u%u%u", pin_bytes[0] % 10u,
+                 pin_bytes[1] % 10u, pin_bytes[2] % 10u, pin_bytes[3] % 10u);
+    } else {
+        snprintf(pin, sizeof(pin), "%u%u%u%u", (unsigned)random() % 10u,
+                 (unsigned)random() % 10u, (unsigned)random() % 10u,
+                 (unsigned)random() % 10u);
+    }
     PairTaskContext task_context = {
         .server = server,
         .pin = &pin[0],
@@ -1122,6 +1358,7 @@ static void action_pair(CONFIGURATION *config, SERVER_DATA *server) {
     } else {
         server->paired = true;
         add_pair_address(config->address, config->port);
+        add_confirmed_pair(config->address, config->port);
         wait_for_button("Host paired successfully.");
     }
 
@@ -1172,27 +1409,56 @@ static void action_quit_stream(SERVER_DATA *server) {
 int main_loop(int argc, char *argv[]) {
     init_3ds();
 
+    srandom((unsigned int)svcGetSystemTick());
+
     CONFIGURATION config;
     config_parse(argc, argv, &config);
     if (potato_init()) {
         potato_apply_config(&config);
     }
 
+    UpdateCheckResult update;
+    run_loading_task("Checking for updates",
+                    "Asking GitHub for the latest StreamPotato release.",
+                    build_profile_status(&config), "Contacting github.com",
+                    update_check_task, &update);
+    if (update.update_available) {
+        char update_message[256];
+        snprintf(update_message, sizeof(update_message),
+                "StreamPotato %s is out, this console runs %s. Grab it from "
+                "github.com/PainDe0Mie/PotatoStream/releases or update via "
+                "Universal-Updater.",
+                update.latest_tag.c_str(), update_check_current_version());
+        wait_for_button(update_message);
+    }
+
     while (aptMainLoop()) {
-        auto address_string = prompt_for_address();
+        bool should_exit = false;
+        auto address_string = prompt_for_address(&should_exit);
+        if (should_exit) {
+            break;
+        }
         if (address_string.empty()) {
             continue;
         }
-        // Split address and port (if specified)
-        uint32_t port_delim_pos = address_string.find(':');
+        size_t port_delim_pos = address_string.find(':');
         if (port_delim_pos != std::string::npos) {
             std::string port_string = address_string.substr(port_delim_pos + 1);
             address_string = address_string.substr(0, port_delim_pos);
-            config.port = std::stoi(port_string);
+            errno = 0;
+            long parsed_port = strtol(port_string.c_str(), nullptr, 10);
+            if (errno != 0 || parsed_port <= 0 || parsed_port > 65535) {
+                printf("Invalid stored port '%s', using default %d\n",
+                       port_string.c_str(), config.port);
+            } else {
+                config.port = (unsigned short)parsed_port;
+            }
         }
         config.address = (char *)address_string.c_str();
 
+        // Zero-initialize SERVER_DATA so gs_init never reads garbage fields.
         SERVER_DATA server;
+        memset(&server, 0, sizeof(server));
         InitServerTaskContext init_context = {
             .config = &config,
             .server = &server,
@@ -1229,23 +1495,30 @@ int main_loop(int argc, char *argv[]) {
             }
         }
     }
+
+    gs_cleanup();
     return 0;
 }
 
 int main(int argc, char *argv[]) {
+    int status = 0;
     try {
         main_loop(argc, argv);
     } catch (const std::exception &ex) {
         printf("StreamPotato crashed with the following error: %s\n",
                ex.what());
-        return 1;
+        status = 1;
     } catch (const std::string &ex) {
         printf("StreamPotato crashed with the following error message: %s\n",
                ex.c_str());
-        return 1;
+        status = 1;
     } catch (...) {
         printf("StreamPotato crashed with an unknown error\n");
-        return 1;
+        status = 1;
     }
-    return 0;
+
+    // A crash must not leave the connection dangling on the host either.
+    gs_cleanup();
+    http_shutdown();
+    return status;
 }
