@@ -6,7 +6,6 @@
 #include <string.h>
 #include <stdio.h>
 
-// Types
 typedef struct X509 { int dummy; } X509;
 typedef struct EVP_PKEY { int dummy; } EVP_PKEY;
 typedef struct PKCS12 { int dummy; } PKCS12;
@@ -24,21 +23,18 @@ typedef struct {
     unsigned char* data; 
 } ASN1_BIT_STRING;
 
-// Constants
 #define EVP_aes_128_ecb() (void*)0
 #define EVP_sha256() (void*)0
 #define EVP_PKEY_RSA 1
 #define BIO_NOCLOSE 0
 #define MBSTRING_ASC 0
 
-// General Functions
 static inline void SHA256(const unsigned char *d, size_t l, unsigned char *md) { if(md) memset(md, 0, 32); }
 static inline void SHA1(const unsigned char *d, size_t l, unsigned char *md) { if(md) memset(md, 0, 20); }
 static inline int RAND_bytes(unsigned char *buf, int num) { return 1; }
 static inline void* OPENSSL_malloc(size_t size) { return malloc(size); }
 static inline void OPENSSL_free(void* ptr) { free(ptr); }
 
-// Digest Sign
 static inline EVP_MD_CTX* EVP_MD_CTX_create() { return (EVP_MD_CTX*)1; }
 static inline int EVP_DigestSignInit(EVP_MD_CTX *ctx, void* s, void* md, void* p, void* pkey) { return 1; }
 static inline int EVP_DigestSignUpdate(EVP_MD_CTX *ctx, const void* data, size_t len) { return 1; }
@@ -53,7 +49,6 @@ static inline int EVP_DigestSignFinal(EVP_MD_CTX *ctx, unsigned char* sig, size_
 }
 static inline void EVP_MD_CTX_destroy(EVP_MD_CTX *ctx) {}
 
-// Cipher
 static inline EVP_CIPHER_CTX* EVP_CIPHER_CTX_new() { return (EVP_CIPHER_CTX*)1; }
 static inline int EVP_EncryptInit(EVP_CIPHER_CTX* ctx, void* cipher, const unsigned char* key, void* iv) { return 1; }
 static inline int EVP_CIPHER_CTX_set_padding(EVP_CIPHER_CTX* ctx, int padding) { return 1; }
@@ -131,5 +126,16 @@ static inline void X509_get0_signature(const ASN1_BIT_STRING** sig, void* p, X50
     mock_sig.length = 64;
     mock_sig.data = mock_data;
     if (sig) *sig = &mock_sig;
+}
+
+// ASN1 time helpers
+static inline const ASN1_TIME* X509_get0_notBefore(const X509* x) { return (const ASN1_TIME*)1; }
+
+static inline int ASN1_TIME_diff(int *pday, int *psec,
+                                  const ASN1_TIME *from,
+                                  const ASN1_TIME *to) {
+    if (pday) *pday = 0;
+    if (psec) *psec = 0;
+    return 1;
 }
 #endif

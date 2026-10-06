@@ -74,13 +74,10 @@ static int mkdirtree(const char* directory) {
   char buffer[PATH_MAX];
   char* p = buffer;
 
-  // The passed in string could be a string literal
-  // so we must copy it first
   strncpy(p, directory, PATH_MAX - 1);
   buffer[PATH_MAX - 1] = '\0';
 
   while (*p != 0) {
-    // Find the end of the path element
     do {
       p++;
     } while (*p != 0 && *p != '/');
@@ -171,6 +168,46 @@ static int load_cert(const char* keyDirectory) {
     fclose(fd);
     gs_error = "Error loading cert into memory";
     return GS_FAILED;
+  }
+
+  {
+    const ASN1_TIME *not_before = X509_get0_notBefore(cert);
+    int pday = 0, psec = 0;
+    if (not_before != NULL &&
+        ASN1_TIME_diff(&pday, &psec, NULL, not_before) == 1 &&
+        (pday > 0 || psec > 0)) {
+
+      X509_free(cert);
+      cert = NULL;
+      fclose(fd);
+      fd = NULL;
+      remove(certificateFilePath);
+
+      char p12FilePath[PATH_MAX];
+      snprintf(p12FilePath, PATH_MAX, "%s/%s", keyDirectory, P12_FILE_NAME);
+      remove(p12FilePath);
+      remove(keyFilePath);
+
+      CERT_KEY_PAIR new_cert = mkcert_generate();
+      if (!mkcert_save(certificateFilePath, p12FilePath, keyFilePath, new_cert)) {
+        mkcert_free(new_cert);
+        gs_error = "Can't regenerate certificate (notBefore was in the future)";
+        return GS_FAILED;
+      }
+      mkcert_free(new_cert);
+      cert_regenerated = true;
+
+      fd = fopen(certificateFilePath, "r");
+      if (fd == NULL) {
+        gs_error = "Can't open regenerated certificate file";
+        return GS_FAILED;
+      }
+      if (!(cert = PEM_read_X509(fd, NULL, NULL, NULL))) {
+        fclose(fd);
+        gs_error = "Error loading regenerated cert into memory";
+        return GS_FAILED;
+      }
+    }
   }
 
   rewind(fd);
@@ -313,9 +350,6 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
     server->httpsPort = 47984;
 
   if (strstr(stateText, "_SERVER_BUSY") == NULL) {
-    // After GFE 2.8, current game remains set even after streaming
-    // has ended. We emulate the old behavior by forcing it to zero
-    // if streaming is not active.
     server->currentGame = 0;
   }
   ret = GS_OK;
@@ -349,7 +383,6 @@ static int load_server_status(PSERVER_DATA server) {
   int ret;
   int i;
 
-  /* Fetch the HTTPS port if we don't have one yet */
   if (!server->httpsPort) {
     ret = load_serverinfo(server, false);
     if (ret != GS_OK)
@@ -613,7 +646,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   pair_stage = "Failed while requesting the server certificate";
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=getservercert&salt=%s&clientcert=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, salt_hex, cert_hex);
+  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=PotatoStream&updateState=1&phrase=getservercert&salt=%s&clientcert=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, salt_hex, cert_hex);
   data = http_create_data();
   if (data == NULL) {
     gs_error = "Not enough memory for pairing HTTP data";
@@ -686,7 +719,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   pair_stage = "Failed while sending the client challenge";
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&clientchallenge=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_hex);
+  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=PotatoStream&updateState=1&clientchallenge=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_hex);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -771,7 +804,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   pair_stage = "Failed while sending the server challenge response";
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&serverchallengeresp=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_response_hex);
+  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=PotatoStream&updateState=1&serverchallengeresp=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_response_hex);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -838,7 +871,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   pair_stage = "Failed while sending the client pairing secret";
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&clientpairingsecret=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, client_pairing_secret_hex);
+  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=PotatoStream&updateState=1&clientpairingsecret=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, client_pairing_secret_hex);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -864,7 +897,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   pair_stage = "Failed while confirming NVIDIA pairing over HTTPS";
-  snprintf(url, url_max_len, "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=pairchallenge", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
+  snprintf(url, url_max_len, "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=PotatoStream&updateState=1&phrase=pairchallenge", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -911,8 +944,6 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   http_free_data(data);
 
-  // If we failed when attempting to pair with a game running, that's likely the issue.
-  // Sunshine supports pairing with an active session, but GFE does not.
   if (ret != GS_OK && server != NULL && server->currentGame != 0) {
     gs_error = "The computer is currently in a game. You must close the game before pairing.";
     ret = GS_WRONG_STATE;

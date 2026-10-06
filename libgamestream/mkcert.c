@@ -28,12 +28,6 @@ static const int NUM_BITS = 2048;
 static const int SERIAL = 0;
 static const int NUM_YEARS = 10;
 
-// The 3DS RTC drifts and is often minutes or hours away from the host clock, so
-// a notBefore taken straight from the console lands in the host's future. Since
-// v2026.516.143833 Sunshine rejects a client certificate that is not yet valid
-// instead of silently accepting it, which fails every https request (applist,
-// launch) while plain http pairing still succeeds. Backdate notBefore so clock
-// skew cannot produce a certificate the host refuses at the TLS layer.
 static const long CLOCK_SKEW_MARGIN_SECONDS = 60L * 60L * 24L * 365L;
 
 int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years);
