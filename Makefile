@@ -65,7 +65,7 @@ GFXBUILD	:=	$(BUILD)
 
 # 3dsx
 APP_TITLE	:=	StreamPotato
-APP_DESCRIPTION	:=	StreamPotato pour Old 3DS/2DS
+APP_DESCRIPTION	:=	StreamPotato - Old & New 3DS/2DS
 APP_AUTHOR	:=	PainDe0Mie
 ICON		:=	3ds/res/ic_streampotato.png
 
@@ -293,7 +293,7 @@ $(OUTPUT).elf	:	$(OFILES)
 %.bgr: %.png
 #---------------------------------------------------------------------------------
 	@echo $(notdir $<)
-	@C:/Python314/python.exe C:/CODECODECODECODECODECOMPILATION/PotatoStream_Build/png_to_bgr565.py $< $@
+	@C:/Python314/python.exe "$(TOPDIR)/png_to_bgr565.py" "$<" "$@"
 	@cp $@ $@.bmp
 
 #---------------------------------------------------------------------------------
