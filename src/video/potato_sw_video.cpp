@@ -84,19 +84,28 @@ PotatoVideoDecoder::~PotatoVideoDecoder() {
 }
 
 int PotatoVideoDecoder::_write_yuv_to_framebuffer(const u8 **source,
+                                                   const int *strides,
                                                    int width, int height,
                                                    int px_size) {
     Handle conv_event;
     int status = 0;
     u64 t_start = svcGetSystemTick();
 
-    status = Y2RU_SetSendingY(source[0], width * height, width, 0);
+    const int luma_gap = strides[0] - width;
+    const int chroma_u_gap = strides[1] - width / 2;
+    const int chroma_v_gap = strides[2] - width / 2;
+    if (luma_gap < 0 || chroma_u_gap < 0 || chroma_v_gap < 0) {
+        potato_frame_skipped();
+        return DR_OK;
+    }
+
+    status = Y2RU_SetSendingY(source[0], width * height, width, luma_gap);
     if (status) { fprintf(stderr, "[POTATO] Y2RU_SetSendingY failed\n"); goto fail; }
 
-    status = Y2RU_SetSendingU(source[1], width * height / 4, width / 2, 0);
+    status = Y2RU_SetSendingU(source[1], width * height / 4, width / 2, chroma_u_gap);
     if (status) { fprintf(stderr, "[POTATO] Y2RU_SetSendingU failed\n"); goto fail; }
 
-    status = Y2RU_SetSendingV(source[2], width * height / 4, width / 2, 0);
+    status = Y2RU_SetSendingV(source[2], width * height / 4, width / 2, chroma_v_gap);
     if (status) { fprintf(stderr, "[POTATO] Y2RU_SetSendingV failed\n"); goto fail; }
 
     status = Y2RU_SetReceiving(
@@ -110,10 +119,18 @@ int PotatoVideoDecoder::_write_yuv_to_framebuffer(const u8 **source,
     if (status) { fprintf(stderr, "[POTATO] Y2RU_StartConversion failed\n"); goto fail; }
 
     status = Y2RU_GetTransferEndEvent(&conv_event);
-    if (status) { fprintf(stderr, "[POTATO] Y2RU_GetTransferEndEvent failed\n"); goto fail; }
+    if (status) {
+        fprintf(stderr, "[POTATO] Y2RU_GetTransferEndEvent failed\n");
+        Y2RU_StopConversion();
+        goto fail;
+    }
 
-    svcWaitSynchronization(conv_event, 10000000); // 10ms max
+    status = svcWaitSynchronization(conv_event, 10000000);
     svcCloseHandle(conv_event);
+    if (R_FAILED(status)) {
+        Y2RU_StopConversion();
+        goto fail;
+    }
 
     renderer_lock.lock();
     renderer->set_perf_decode_ticks(svcGetSystemTick() - t_start);
@@ -150,12 +167,7 @@ void PotatoVideoDecoder::_record_frame_cost(u64 frame_start_ticks) {
 }
 
 int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
-
-    // Frame skip
-    if (potato_should_skip_frame()) {
-        potato_frame_skipped();
-        return DR_OK;
-    }
+    const bool present_frame = !potato_should_skip_frame();
 
     const u64 frame_start_ticks = svcGetSystemTick();
     PLENTRY entry = decodeUnit->bufferList;
@@ -183,8 +195,15 @@ int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
         return DR_OK;
     }
 
-    const int result = _write_yuv_to_framebuffer(
-        (const u8 **)frame->data, image_width, image_height, pixel_size);
+    if (!present_frame) {
+        _record_frame_cost(frame_start_ticks);
+        potato_frame_skipped();
+        return DR_OK;
+    }
+
+    const int result =
+        _write_yuv_to_framebuffer((const u8 **)frame->data, frame->linesize,
+                                  image_width, image_height, pixel_size);
     _record_frame_cost(frame_start_ticks);
     return result;
 }

@@ -12,8 +12,8 @@ class PotatoVideoDecoder : public VideoDecoderBase {
     int submit_decode_unit(PDECODE_UNIT decodeUnit);
 
   private:
-    int _write_yuv_to_framebuffer(const u8 **source, int width,
-                                  int height, int px_size);
+    int _write_yuv_to_framebuffer(const u8 **source, const int *strides,
+                                  int width, int height, int px_size);
     void _record_frame_cost(u64 frame_start_ticks);
   private:
     void   *ffmpeg_buffer      = nullptr;
