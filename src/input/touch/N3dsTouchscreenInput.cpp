@@ -22,9 +22,10 @@
 
 N3dsTouchscreenInput::N3dsTouchscreenInput(GAMEPAD_STATE *gamepad_in,
                                            int image_width_in,
-                                           int image_height_in)
+                                           int image_height_in,
+                                           bool view_only_in)
     : gamepad_state(gamepad_in), image_width(image_width_in),
-      image_height(image_height_in) {
+      image_height(image_height_in), view_only(view_only_in) {
     MessageDispatcher::get_instance()->subscribe(
         MessageType::TOUCH_STATE_CHANGED, this);
 };
@@ -83,6 +84,10 @@ void N3dsTouchscreenInput::n3dsinput_handle_touch(u32 kDown, u32 kUp) {
     }
 
     if (handler == nullptr) {
+        return;
+    }
+
+    if (view_only && touch_type != N3dsTouchType::MENU_TOUCH) {
         return;
     }
 

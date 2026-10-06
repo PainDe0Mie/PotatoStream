@@ -27,7 +27,7 @@
 class N3dsTouchscreenInput : public ISubscriber {
   public:
     N3dsTouchscreenInput(GAMEPAD_STATE *gamepad_in, int image_width_in,
-                         int image_height_in);
+                         int image_height_in, bool view_only_in = false);
     ~N3dsTouchscreenInput();
 
     void accept(IMessage *msg) override;
@@ -40,6 +40,7 @@ class N3dsTouchscreenInput : public ISubscriber {
   private:
     GAMEPAD_STATE *gamepad_state;
     int image_width, image_height;
+    bool view_only = false;
     AtomicVar<N3dsTouchType> next_touch_type = N3dsTouchType::DISABLED;
     N3dsTouchType touch_type = N3dsTouchType::DISABLED;
     std::unique_ptr<TouchHandlerBase> handler = nullptr;
