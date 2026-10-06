@@ -60,6 +60,12 @@ typedef struct _CONFIGURATION {
     bool experimental_stable_stream;
     bool experimental_ultra_potato;
     bool experimental_stereoscopic_3d;
+    bool autodiscover;
+    bool auto_width;
+    bool auto_height;
+    bool auto_fps;
+    bool auto_bitrate;
+    bool auto_packetsize;
 } CONFIGURATION, *PCONFIGURATION;
 
 bool config_file_parse(PCONFIGURATION config);

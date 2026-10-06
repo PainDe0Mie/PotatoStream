@@ -61,6 +61,12 @@ static struct option long_options[] = {
     {"stable_stream", required_argument, NULL, 'E'},
     {"ultra_potato", required_argument, NULL, 'F'},
     {"stereoscopic_3d", required_argument, NULL, 'G'},
+    {"autodiscover", required_argument, NULL, 'H'},
+    {"auto_width", required_argument, NULL, 'I'},
+    {"auto_height", required_argument, NULL, 'J'},
+    {"auto_fps", required_argument, NULL, 'K'},
+    {"auto_bitrate", required_argument, NULL, 'L'},
+    {"auto_packetsize", required_argument, NULL, 'M'},
     {0, 0, 0, 0},
 };
 
@@ -167,6 +173,26 @@ void parse_argument(int c, char *value, PCONFIGURATION config) {
     case 'G':
         config->experimental_stereoscopic_3d =
             ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'H':
+        config->autodiscover = ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
+    case 'I':
+        config->auto_width = ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
+    case 'J':
+        config->auto_height = ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
+    case 'K':
+        config->auto_fps = ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
+    case 'L':
+        config->auto_bitrate =
+            ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
+    case 'M':
+        config->auto_packetsize =
+            ((value == NULL) || (strcmp(value, "false") != 0));
         break;
     case 1:
         if (config->action == NULL)
@@ -275,6 +301,13 @@ bool config_save(const char *filename, PCONFIGURATION config) {
     write_config_bool(fd, "ultra_potato", config->experimental_ultra_potato);
     write_config_bool(fd, "stereoscopic_3d",
                       config->experimental_stereoscopic_3d);
+    write_config_int(fd, "port", config->port);
+    write_config_bool(fd, "autodiscover", config->autodiscover);
+    write_config_bool(fd, "auto_width", config->auto_width);
+    write_config_bool(fd, "auto_height", config->auto_height);
+    write_config_bool(fd, "auto_fps", config->auto_fps);
+    write_config_bool(fd, "auto_bitrate", config->auto_bitrate);
+    write_config_bool(fd, "auto_packetsize", config->auto_packetsize);
 
     if (config->app != NULL && strcmp(config->app, "Steam") != 0)
         write_config_string(fd, "app", config->app);
@@ -304,6 +337,7 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->quitappafter = false;
     config->viewonly = false;
     config->port = 47989;
+    config->autodiscover = true;
 
     if (dir_has_any_file(STREAMPOTATO_3DS_PATH "/keys")) {
         strcpy(config->key_dir, STREAMPOTATO_3DS_PATH "/keys");
@@ -325,6 +359,11 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->experimental_stable_stream = false;
     config->experimental_ultra_potato = false;
     config->experimental_stereoscopic_3d = false;
+    config->auto_width = true;
+    config->auto_height = true;
+    config->auto_fps = true;
+    config->auto_bitrate = true;
+    config->auto_packetsize = true;
 
     config_file_parse(config);
 
