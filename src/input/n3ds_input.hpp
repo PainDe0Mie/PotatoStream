@@ -27,7 +27,8 @@
 class N3dsInput : public ISubscriber {
   public:
     N3dsInput(int image_width, int image_height, bool swap_face_buttons,
-              bool swap_triggers_and_shoulders, bool use_triggers_for_mouse_in);
+              bool swap_triggers_and_shoulders, bool use_triggers_for_mouse_in,
+              bool view_only_in = false);
     ~N3dsInput();
     void accept(IMessage *msg) override;
     void n3dsinput_handle_event();
@@ -46,12 +47,11 @@ class N3dsInput : public ISubscriber {
     std::unique_ptr<N3dsTouchscreenInput> touch_handler = nullptr;
 
     float gyro_coeff = 0;
-    // Note: This was found experimentally and may need a calibration option in
-    // settings
     float accel_coeff = 52.0;
     AtomicVar<bool> enable_gyro = false;
     AtomicVar<bool> enable_accel = false;
     bool use_triggers_for_mouse = false;
+    bool view_only = false;
     bool menu_active = false;
 
     uint32_t CUSTOM_KEY_A;

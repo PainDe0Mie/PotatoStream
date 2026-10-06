@@ -38,20 +38,20 @@
 #define N3DS_C_STICK_MAX 100
 #define N3DS_ANALOG_POS_FACTOR 5
 
-// The 3DS only has one controller; set it to P1
 #define CONTROLLER_NUMBER 0
 #define ACTIVE_GAMEPAD_MASK 1
 
 N3dsInput::N3dsInput(int image_width, int image_height, bool swap_face_buttons,
                      bool swap_triggers_and_shoulders,
-                     bool use_triggers_for_mouse_in) {
+                     bool use_triggers_for_mouse_in, bool view_only_in) {
     hidInit();
     HIDUSER_GetGyroscopeRawToDpsCoefficient(&gyro_coeff);
-    _add_gamepad();
+    view_only = view_only_in;
+    if (!view_only) {
+        _add_gamepad();
+    }
     use_triggers_for_mouse = use_triggers_for_mouse_in;
 
-    // Ternary setup is less efficient, but more readable.
-    // We can afford the minor performance cost here.
     CUSTOM_KEY_A = swap_face_buttons ? KEY_B : KEY_A;
     CUSTOM_KEY_B = swap_face_buttons ? KEY_A : KEY_B;
     CUSTOM_KEY_X = swap_face_buttons ? KEY_Y : KEY_X;
@@ -64,7 +64,7 @@ N3dsInput::N3dsInput(int image_width, int image_height, bool swap_face_buttons,
 
     aptSetHomeAllowed(false);
     touch_handler = std::make_unique<N3dsTouchscreenInput>(
-        &gamepad_state, image_width, image_height);
+        &gamepad_state, image_width, image_height, view_only);
 
     auto pDispatcher = MessageDispatcher::get_instance();
     pDispatcher->subscribe(MessageType::ENABLE_ACCEL, this);
@@ -76,7 +76,9 @@ N3dsInput::~N3dsInput() {
     pDispatcher->unsubscribe(MessageType::ENABLE_ACCEL, this);
     pDispatcher->unsubscribe(MessageType::ENABLE_GYRO, this);
 
-    _remove_gamepad();
+    if (!view_only) {
+        _remove_gamepad();
+    }
     gamepad_state = GAMEPAD_STATE();
     previous_state = GAMEPAD_STATE();
     touch_handler = nullptr;
@@ -184,18 +186,23 @@ void N3dsInput::n3dsinput_handle_event() {
 
     touch_handler->n3dsinput_handle_touch(kDown, kUp);
 
-    if (kDown & ~KEY_TOUCH) {
-        gamepad_state.buttons |= _n3ds_to_li_buttons(kDown);
-        gamepad_state.leftTrigger |= n3ds_to_li_trigger(kDown, CUSTOM_KEY_ZL);
-        gamepad_state.rightTrigger |= n3ds_to_li_trigger(kDown, CUSTOM_KEY_ZR);
-    }
-    if (kUp & ~KEY_TOUCH) {
-        gamepad_state.buttons &= ~_n3ds_to_li_buttons(kUp);
-        gamepad_state.leftTrigger &= ~n3ds_to_li_trigger(kUp, CUSTOM_KEY_ZL);
-        gamepad_state.rightTrigger &= ~n3ds_to_li_trigger(kUp, CUSTOM_KEY_ZR);
+    if (!view_only) {
+        if (kDown & ~KEY_TOUCH) {
+            gamepad_state.buttons |= _n3ds_to_li_buttons(kDown);
+            gamepad_state.leftTrigger |=
+                n3ds_to_li_trigger(kDown, CUSTOM_KEY_ZL);
+            gamepad_state.rightTrigger |=
+                n3ds_to_li_trigger(kDown, CUSTOM_KEY_ZR);
+        }
+        if (kUp & ~KEY_TOUCH) {
+            gamepad_state.buttons &= ~_n3ds_to_li_buttons(kUp);
+            gamepad_state.leftTrigger &= ~n3ds_to_li_trigger(kUp, CUSTOM_KEY_ZL);
+            gamepad_state.rightTrigger &=
+                ~n3ds_to_li_trigger(kUp, CUSTOM_KEY_ZR);
+        }
     }
 
-    // Use the HOME button to open the menu
+    // HOME button to open the menu
     if (aptCheckHomePressRejected()) {
         if (!menu_active) {
             force_touchscreen_menu();
@@ -204,6 +211,10 @@ void N3dsInput::n3dsinput_handle_event() {
         return;
     } else {
         menu_active = false;
+    }
+
+    if (view_only) {
+        return;
     }
 
     circlePosition cpad_pos;
