@@ -77,8 +77,8 @@ class SoftVideoDecoder : public VideoDecoderBase {
     int submit_decode_unit(PDECODE_UNIT decodeUnit);
 
   private:
-    inline int _write_yuv_to_framebuffer(const u8 **source, int width,
-                                         int height, int px_size);
+    inline int _write_yuv_to_framebuffer(const u8 **source, const int *strides,
+                                         int width, int height, int px_size);
 
   private:
     void *ffmpeg_buffer;
