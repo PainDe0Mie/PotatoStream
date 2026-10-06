@@ -67,7 +67,7 @@ N3dsRendererBase::~N3dsRendererBase() {
     }
     gfxScreenSwapBuffers(screen, true);
 
-    // Return to the default display width before exiting
+    //  default display width before exiting
     if (surface_width == GSP_SCREEN_HEIGHT_TOP_2X) {
         gfxSetWide(false);
     }
@@ -98,11 +98,9 @@ inline void N3dsRendererBase::write24(u8 *p, u32 val) {
 inline void N3dsRendererBase::draw_perf_counters() {
     u8 *dest = gfxGetFramebuffer(screen, GFX_LEFT, NULL, NULL);
 
-    // Use a line going across the first scanline (left) for the perf counters.
-    // Clear to black
+    // clear to black
     memset(dest, 0, GSP_SCREEN_WIDTH * 3);
 
-    // Display frame target in the middle of the screen.
     double perf_tick_divisor =
         ((double)GSP_SCREEN_WIDTH) / ((double)(perf_frame_target_ticks * 2));
     u32 perf_px = 0;
@@ -121,33 +119,21 @@ inline void N3dsRendererBase::draw_perf_counters() {
     PERF_DRAW(perf_decode_ticks, 255, 0, 0);
     PERF_DRAW(perf_fbcopy_ticks, 0, 0, 255);
 
-    // Draw two green pixels at the center
     perf_px = (GSP_SCREEN_WIDTH / 2) - 1;
     PERF_DRAW(0, 0, 255, 0);
     PERF_DRAW(0, 0, 255, 0);
 }
 
 void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
-    // Do nothing when GPU right is lost, otherwise we hang when going to
-    // the home menu.
     if (!gspHasGpuRight()) {
         return;
     }
 
     u64 start_ticks = svcGetSystemTick();
 
-    // NOTE: At 800x480, we can display the _width_ natively, but the height
-    // needs to be downsampled. MVD is incapable of downsampling, so we have to
-    // do it on the GPU.
-
-    // TODO: If we can use rotation from the decoder, we can do a 2x downscale
-    // using display transfer and skip P3D. Not necessary because PICA is
-    // significantly faster than the decoder.
-
-    // Tile the source image into the scratch buffer.
-    GSPGPU_FlushDataCache(
-        source,
-        static_cast<u32>(source_stride_px * source_buffer_height * px_size));
+    const u32 source_size =
+        static_cast<u32>(source_stride_px * source_buffer_height * px_size);
+    GSPGPU_FlushDataCache(source, source_size);
     GX_DisplayTransfer(
         (u32 *)source,
         GX_BUFFER_DIM(source_stride_px, source_buffer_height),
@@ -160,8 +146,6 @@ void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
     // While the transfer is running, create a temporary command list to rotate
     // the framebuffer into source
     GPUCMD_SetBuffer(cmdlist, CMDLIST_SZ, 0);
-
-    // TODO: Verify this mitigates rounding errors due to f24 precision issues.
 
 #define C GPUCMD_AddWrite
 
@@ -363,12 +347,10 @@ void N3dsRendererBase::write_px_to_framebuffer_gpu(uint8_t *__restrict source) {
     u32 *unused;
     u32 cmdlist_len;
     GPUCMD_Split(&unused, &cmdlist_len);
-    GSPGPU_FlushDataCache(cmdlist, cmdlist_len);
+    GSPGPU_FlushDataCache(cmdlist, cmdlist_len * 4);
 
-    extern u32 __ctru_linear_heap;
-    extern u32 __ctru_linear_heap_size;
-    GX_FlushCacheRegions(cmdlist, cmdlist_len * 4, (u32 *)__ctru_linear_heap,
-                         __ctru_linear_heap_size, NULL, 0);
+    GX_FlushCacheRegions(cmdlist, cmdlist_len * 4, (u32 *)source, source_size,
+                         NULL, 0);
 
     GX_ProcessCommandList(cmdlist, cmdlist_len * 4, 2);
 
