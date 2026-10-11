@@ -60,6 +60,13 @@ typedef struct _CONFIGURATION {
     bool experimental_stable_stream;
     bool experimental_ultra_potato;
     bool experimental_stereoscopic_3d;
+    // New 3DS hw decoder: 24-bit output (experimental)
+    bool color_24bit;
+    // network / audio on a 2nd core, auto = picked from the console model
+    bool network_2nd_core;
+    bool auto_network_2nd_core;
+    bool audio_2nd_core;
+    bool auto_audio_2nd_core;
     bool autodiscover;
     bool auto_width;
     bool auto_height;

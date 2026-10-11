@@ -67,6 +67,11 @@ static struct option long_options[] = {
     {"auto_fps", required_argument, NULL, 'K'},
     {"auto_bitrate", required_argument, NULL, 'L'},
     {"auto_packetsize", required_argument, NULL, 'M'},
+    {"color_24bit", required_argument, NULL, 'N'},
+    {"network_2nd_core", required_argument, NULL, 'O'},
+    {"auto_network_2nd_core", required_argument, NULL, 'P'},
+    {"audio_2nd_core", required_argument, NULL, 'Q'},
+    {"auto_audio_2nd_core", required_argument, NULL, 'R'},
     {0, 0, 0, 0},
 };
 
@@ -194,6 +199,25 @@ void parse_argument(int c, char *value, PCONFIGURATION config) {
         config->auto_packetsize =
             ((value == NULL) || (strcmp(value, "false") != 0));
         break;
+    case 'N':
+        config->color_24bit = ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'O':
+        config->network_2nd_core =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'P':
+        config->auto_network_2nd_core =
+            ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
+    case 'Q':
+        config->audio_2nd_core =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'R':
+        config->auto_audio_2nd_core =
+            ((value == NULL) || (strcmp(value, "false") != 0));
+        break;
     case 1:
         if (config->action == NULL)
             config->action = value;
@@ -301,6 +325,12 @@ bool config_save(const char *filename, PCONFIGURATION config) {
     write_config_bool(fd, "ultra_potato", config->experimental_ultra_potato);
     write_config_bool(fd, "stereoscopic_3d",
                       config->experimental_stereoscopic_3d);
+    write_config_bool(fd, "color_24bit", config->color_24bit);
+    write_config_bool(fd, "network_2nd_core", config->network_2nd_core);
+    write_config_bool(fd, "auto_network_2nd_core",
+                      config->auto_network_2nd_core);
+    write_config_bool(fd, "audio_2nd_core", config->audio_2nd_core);
+    write_config_bool(fd, "auto_audio_2nd_core", config->auto_audio_2nd_core);
     write_config_int(fd, "port", config->port);
     write_config_bool(fd, "autodiscover", config->autodiscover);
     write_config_bool(fd, "auto_width", config->auto_width);
@@ -324,6 +354,9 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->stream.streamingRemotely = STREAM_CFG_AUTO;
     config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
     config->stream.supportedVideoFormats = SCM_H264;
+    // same coefficients as Y2R (BT.601, TV range)
+    config->stream.colorSpace = COLORSPACE_REC_601;
+    config->stream.colorRange = COLOR_RANGE_LIMITED;
 
     config->platform = "auto";
     config->app = "Steam";
@@ -359,6 +392,11 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->experimental_stable_stream = false;
     config->experimental_ultra_potato = false;
     config->experimental_stereoscopic_3d = false;
+    config->color_24bit = false;
+    config->network_2nd_core = false;
+    config->auto_network_2nd_core = true;
+    config->audio_2nd_core = false;
+    config->auto_audio_2nd_core = true;
     config->auto_width = true;
     config->auto_height = true;
     config->auto_fps = true;
