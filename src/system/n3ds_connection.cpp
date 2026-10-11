@@ -31,6 +31,8 @@ std::unique_ptr<N3dsConnectionListener> N3dsConnectionListener::instance =
 
 void N3dsConnectionListener::stage_starting(int stage) {
     last_stage.store(stage);
+    // show which connection step we're stuck on
+    printf("%s...\n", LiGetStageName(stage));
 }
 
 void N3dsConnectionListener::stage_complete(int stage) {
@@ -41,6 +43,7 @@ void N3dsConnectionListener::stage_complete(int stage) {
 void N3dsConnectionListener::stage_failed(int stage, int errorCode) {
     last_stage.store(stage);
     last_stage_error.store(errorCode);
+    printf("%s failed: %d\n", LiGetStageName(stage), errorCode);
 }
 
 void N3dsConnectionListener::connection_started() {
@@ -87,7 +90,9 @@ void N3dsConnectionListener::connection_terminated(int errorCode) {
 
 void N3dsConnectionListener::connection_log_message(const char *format,
                                                     va_list arglist) {
-    if (!debug.load()) {
+    // always show the library messages during start/stop, helps to see where it fails
+    if (!debug.load() && connection_started_flag.load() &&
+        !connection_closed.load()) {
         return;
     }
     vprintf(format, arglist);
