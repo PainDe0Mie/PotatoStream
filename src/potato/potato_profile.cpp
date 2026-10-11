@@ -104,8 +104,25 @@ bool potato_init(void) {
     }
 
     if (!g_potato.is_potato) {
-        printf("[P.S.] New 3DS detected (model=%d), keeping normal mode\n",
+        // Determine a human-readable model name for New 3DS variants.
+        const char *n3ds_model_name = "New 3DS";
+        switch (g_potato.model) {
+        case CFG_MODEL_N3DS:   n3ds_model_name = "New 3DS";       break;
+        case CFG_MODEL_N3DSXL: n3ds_model_name = "New 3DS XL";    break;
+        case CFG_MODEL_N2DSXL: n3ds_model_name = "New 2DS XL";    break;
+        default:               n3ds_model_name = "New 3DS (unk)"; break;
+        }
+
+        // New 3DS values, audio and UI read them even if is_potato is false
+        g_potato.hw_decode = true;           // MVD hardware decoder available
+        g_potato.frame_skip_enabled = false;  // No frame-skip needed
+        g_potato.audio_buf_ms = 20;           // Low-latency: 20 ms (vs 60 ms O3DS)
+        g_potato.packet_size = 1392;          // Larger packets for faster cores
+
+        printf("[N3DS] Detected: %s (model=%d)\n", n3ds_model_name,
                g_potato.model);
+        printf("[N3DS] Hardware H.264 decoder: available (MVD)\n");
+        printf("[N3DS] Audio buffer target   : %d ms\n", g_potato.audio_buf_ms);
         return false;
     }
 
@@ -163,8 +180,11 @@ bool potato_should_skip_frame(void) {
         return false;
     }
 
-    if (g_potato.consecutive_skips >=
-        (uint32_t)g_potato.max_consecutive_skips) {
+    uint32_t skip_cap = (uint32_t)g_potato.max_consecutive_skips;
+    if (skip_cap > POTATO_PRESENT_SKIP_CAP) {
+        skip_cap = POTATO_PRESENT_SKIP_CAP;
+    }
+    if (g_potato.consecutive_skips >= skip_cap) {
         return false;
     }
 
@@ -270,15 +290,38 @@ void potato_apply_config(void *moonlight_config) {
 
     CONFIGURATION *cfg = static_cast<CONFIGURATION *>(moonlight_config);
     potato_resolve_profile(cfg);
-    cfg->stream.width = g_potato.width;
-    cfg->stream.height = g_potato.height;
-    cfg->stream.fps = g_potato.fps;
-    cfg->stream.bitrate = g_potato.bitrate_kbps;
-    cfg->stream.packetSize = g_potato.packet_size;
+
     cfg->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
     cfg->video_decoder = VIDEO_DECODER_TYPE::SOFTWARE_VIDEO_DECODER;
     cfg->localaudio = g_potato.host_audio;
-    cfg->motion_controls = false;
+
+    // locked values come from the profile, the others are copied back so the
+    // renderer sees the real stream size
+    if (cfg->auto_width) {
+        cfg->stream.width = g_potato.width;
+    } else {
+        g_potato.width = cfg->stream.width;
+    }
+    if (cfg->auto_height) {
+        cfg->stream.height = g_potato.height;
+    } else {
+        g_potato.height = cfg->stream.height;
+    }
+    if (cfg->auto_fps) {
+        cfg->stream.fps = g_potato.fps;
+    } else {
+        g_potato.fps = cfg->stream.fps;
+    }
+    if (cfg->auto_bitrate) {
+        cfg->stream.bitrate = g_potato.bitrate_kbps;
+    } else {
+        g_potato.bitrate_kbps = cfg->stream.bitrate;
+    }
+    if (cfg->auto_packetsize) {
+        cfg->stream.packetSize = g_potato.packet_size;
+    } else {
+        g_potato.packet_size = cfg->stream.packetSize;
+    }
 }
 
 void potato_set_stereoscopic_3d(bool enabled) {
