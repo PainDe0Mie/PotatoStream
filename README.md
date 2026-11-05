@@ -50,7 +50,9 @@ To install CFW: [3ds.hacks.guide](https://3ds.hacks.guide/)
 
 Or scan the QR code with FBI:
 
-<img width="272" height="270" alt="qrcode" src="https://github.com/user-attachments/assets/b76d398d-2c85-4c19-9de2-643b7efc7aaa" />
+<img width="272" height="270" alt="qrcode" src="https://github.com/user-attachments/assets/54e4f856-1402-4d58-b7bc-38f57bb0c152" />
+
+
 ---
 
 ## First time setup
