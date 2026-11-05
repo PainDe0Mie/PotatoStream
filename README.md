@@ -119,6 +119,7 @@ make
 - [moonlight-N3DS](https://github.com/zoeyjodon/moonlight-N3DS) by zoeyjodon
 - [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)
 - [Moonlight Embedded](https://github.com/moonlight-stream/moonlight-embedded)
+- [FFmpeg](https://ffmpeg.org/) and [Opus](https://opus-codec.org/)
 
 ---
 
