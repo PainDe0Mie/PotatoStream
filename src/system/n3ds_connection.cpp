@@ -141,7 +141,7 @@ void N3dsConnectionListener::set_motion_event_state(
             auto pDispatcher = MessageDispatcher::get_instance();
             auto msg = std::make_shared<GenericEventMsg>(ENABLE_GYRO);
             pDispatcher->post(msg);
-        } else {
+        } else if (!n3ds_input_gyro_camera_active()) {
             HIDUSER_DisableGyroscope();
         }
         break;
