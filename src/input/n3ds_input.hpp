@@ -21,14 +21,19 @@
 
 #include "../system/AtomicVar.hpp"
 #include "../system/subscriber.hpp"
+#include "camera_stick.hpp"
 #include "touch/N3dsTouchscreenInput.hpp"
 #include <stdbool.h>
+
+bool n3ds_input_gyro_camera_active();
 
 class N3dsInput : public ISubscriber {
   public:
     N3dsInput(int image_width, int image_height, bool swap_face_buttons,
               bool swap_triggers_and_shoulders, bool use_triggers_for_mouse_in,
-              bool view_only_in = false);
+              bool view_only_in = false, int camera_mode_in = 0,
+              int camera_sens_in = 5, int camera_invert_in = 0,
+              bool bottom_auto_off_in = false);
     ~N3dsInput();
     void accept(IMessage *msg) override;
     void n3dsinput_handle_event();
@@ -41,6 +46,7 @@ class N3dsInput : public ISubscriber {
     bool _gamepad_state_changed();
     bool _accelerometer_state_changed();
     bool _gyroscope_state_changed();
+    void _update_right_stick();
 
   private:
     GAMEPAD_STATE gamepad_state, previous_state;
@@ -53,6 +59,11 @@ class N3dsInput : public ISubscriber {
     bool use_triggers_for_mouse = false;
     bool view_only = false;
     bool menu_active = false;
+    bool gyro_camera = false;
+    GyroCameraStick gyro_stick;
+    u64 gyro_last_tick = 0;
+    int camera_sign_x = 1;
+    int camera_sign_y = 1;
 
     uint32_t CUSTOM_KEY_A;
     uint32_t CUSTOM_KEY_B;

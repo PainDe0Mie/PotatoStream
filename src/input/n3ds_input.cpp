@@ -41,12 +41,27 @@
 #define CONTROLLER_NUMBER 0
 #define ACTIVE_GAMEPAD_MASK 1
 
+static volatile bool g_gyro_camera_active = false;
+
+bool n3ds_input_gyro_camera_active() { return g_gyro_camera_active; }
+
 N3dsInput::N3dsInput(int image_width, int image_height, bool swap_face_buttons,
                      bool swap_triggers_and_shoulders,
-                     bool use_triggers_for_mouse_in, bool view_only_in) {
+                     bool use_triggers_for_mouse_in, bool view_only_in,
+                     int camera_mode_in, int camera_sens_in,
+                     int camera_invert_in, bool bottom_auto_off_in) {
     hidInit();
     HIDUSER_GetGyroscopeRawToDpsCoefficient(&gyro_coeff);
     view_only = view_only_in;
+    camera_sign_x = (camera_invert_in & 1) ? -1 : 1;
+    camera_sign_y = (camera_invert_in & 2) ? -1 : 1;
+    gyro_camera = !view_only && camera_mode_has_gyro(camera_mode_in);
+    if (gyro_camera) {
+        gyro_stick.configure(camera_sens_in);
+        gyro_stick.reset();
+        HIDUSER_EnableGyroscope();
+        g_gyro_camera_active = true;
+    }
     if (!view_only) {
         _add_gamepad();
     }
@@ -64,7 +79,8 @@ N3dsInput::N3dsInput(int image_width, int image_height, bool swap_face_buttons,
 
     aptSetHomeAllowed(false);
     touch_handler = std::make_unique<N3dsTouchscreenInput>(
-        &gamepad_state, image_width, image_height, view_only);
+        &gamepad_state, image_width, image_height, view_only, camera_mode_in,
+        camera_sens_in, bottom_auto_off_in);
 
     auto pDispatcher = MessageDispatcher::get_instance();
     pDispatcher->subscribe(MessageType::ENABLE_ACCEL, this);
@@ -82,6 +98,10 @@ N3dsInput::~N3dsInput() {
     gamepad_state = GAMEPAD_STATE();
     previous_state = GAMEPAD_STATE();
     touch_handler = nullptr;
+    if (gyro_camera) {
+        g_gyro_camera_active = false;
+        HIDUSER_DisableGyroscope();
+    }
     aptSetHomeAllowed(true);
     hidExit();
     printf("Input handler shutdown successfully\n");
@@ -172,6 +192,49 @@ bool N3dsInput::_gyroscope_state_changed() {
            (previous_state.gyro_rate_z != gamepad_state.gyro_rate_z);
 }
 
+static inline short clamp_axis(int v) {
+    if (v > SHRT_MAX)
+        return SHRT_MAX;
+    if (v < -SHRT_MAX)
+        return -SHRT_MAX;
+    return (short)v;
+}
+
+// C-Stick (New 3DS) + "camera stick" added up
+void N3dsInput::_update_right_stick() {
+    circlePosition cstick_pos;
+    hidCstickRead(&cstick_pos);
+    const int cx = scale_n3ds_axis(cstick_pos.dx, N3DS_C_STICK_MAX);
+    const int cy = scale_n3ds_axis(cstick_pos.dy, N3DS_C_STICK_MAX);
+
+    int rx = 0;
+    int ry = 0;
+    if (gamepad_state.touch_stick) {
+        rx += (int)(gamepad_state.touch_rx * SHRT_MAX);
+        ry += (int)(gamepad_state.touch_ry * SHRT_MAX);
+    }
+
+    if (gyro_camera) {
+        const u64 tick = svcGetSystemTick();
+        if (gyro_last_tick != 0) {
+            angularRate rate;
+            hidGyroRead(&rate);
+
+            const float pitch = -rate.x / gyro_coeff;
+            const float yaw = rate.y / gyro_coeff;
+
+            gyro_stick.update(yaw, pitch, (float)(tick - gyro_last_tick) / SYSCLOCK_ARM11);
+            rx += (int)(gyro_stick.x() * SHRT_MAX);
+            ry += (int)(gyro_stick.y() * SHRT_MAX);
+        }
+
+        gyro_last_tick = tick;
+    }
+
+    gamepad_state.rightStickX = clamp_axis(cx + camera_sign_x * rx);
+    gamepad_state.rightStickY = clamp_axis(cy + camera_sign_y * ry);
+}
+
 void N3dsInput::force_touchscreen_menu() {
     auto message =
         std::make_shared<TouchStateChangedMsg>(N3dsTouchType::MENU_TOUCH);
@@ -182,24 +245,17 @@ void N3dsInput::n3dsinput_handle_event() {
     hidScanInput();
     u32 kDown = hidKeysDown();
     u32 kUp = hidKeysUp();
+    u32 kHeld = hidKeysHeld();
     previous_state = gamepad_state;
 
     touch_handler->n3dsinput_handle_touch(kDown, kUp);
 
     if (!view_only) {
-        if (kDown & ~KEY_TOUCH) {
-            gamepad_state.buttons |= _n3ds_to_li_buttons(kDown);
-            gamepad_state.leftTrigger |=
-                n3ds_to_li_trigger(kDown, CUSTOM_KEY_ZL);
-            gamepad_state.rightTrigger |=
-                n3ds_to_li_trigger(kDown, CUSTOM_KEY_ZR);
-        }
-        if (kUp & ~KEY_TOUCH) {
-            gamepad_state.buttons &= ~_n3ds_to_li_buttons(kUp);
-            gamepad_state.leftTrigger &= ~n3ds_to_li_trigger(kUp, CUSTOM_KEY_ZL);
-            gamepad_state.rightTrigger &=
-                ~n3ds_to_li_trigger(kUp, CUSTOM_KEY_ZR);
-        }
+        const u32 keys = (kHeld & ~KEY_TOUCH) | gamepad_state.touch_keys;
+        gamepad_state.buttons =
+            _n3ds_to_li_buttons(keys) | gamepad_state.touch_buttons;
+        gamepad_state.leftTrigger = n3ds_to_li_trigger(keys, CUSTOM_KEY_ZL);
+        gamepad_state.rightTrigger = n3ds_to_li_trigger(keys, CUSTOM_KEY_ZR);
     }
 
     // HOME button to open the menu
@@ -222,12 +278,7 @@ void N3dsInput::n3dsinput_handle_event() {
     gamepad_state.leftStickX = scale_n3ds_axis(cpad_pos.dx, N3DS_ANALOG_MAX);
     gamepad_state.leftStickY = scale_n3ds_axis(cpad_pos.dy, N3DS_ANALOG_MAX);
 
-    circlePosition cstick_pos;
-    hidCstickRead(&cstick_pos);
-    gamepad_state.rightStickX =
-        scale_n3ds_axis(cstick_pos.dx, N3DS_C_STICK_MAX);
-    gamepad_state.rightStickY =
-        scale_n3ds_axis(cstick_pos.dy, N3DS_C_STICK_MAX);
+    _update_right_stick();
 
     if (_gamepad_state_changed()) {
         if (use_triggers_for_mouse) {
