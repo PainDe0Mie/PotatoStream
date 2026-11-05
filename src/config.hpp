@@ -56,17 +56,36 @@ typedef struct _CONFIGURATION {
     bool swap_face_buttons;
     bool swap_triggers_and_shoulders;
     bool use_triggers_for_mouse;
+
+    // Old 3DS stream profile (PotatoProfileChoice)
+    // config_set_potato_profile()
+    int potato_profile;
     bool experimental_better_screen;
     bool experimental_stable_stream;
     bool experimental_ultra_potato;
     bool experimental_stereoscopic_3d;
+
     // New 3DS hw decoder: 24-bit output (experimental)
     bool color_24bit;
-    // network / audio on a 2nd core, auto = picked from the console model
+
+    // network/audio on a 2nd core
     bool network_2nd_core;
     bool auto_network_2nd_core;
     bool audio_2nd_core;
     bool auto_audio_2nd_core;
+
+    // Old 3DS: half of the video decoding on core 1 (experimental)
+    bool video_2nd_core;
+
+    // right stick on the touch gamepad (CameraStickMode)
+    int camera_mode;
+    int camera_sensitivity;
+
+    // bit 0: invert X, bit 1: invert Y (touch and gyro camera only)
+    int camera_invert;
+    
+    // backlight of the bottom screen off after a while without touch
+    bool bottom_screen_auto_off;
     bool autodiscover;
     bool auto_width;
     bool auto_height;
@@ -79,3 +98,4 @@ bool config_file_parse(PCONFIGURATION config);
 void config_parse(int argc, char *argv[], PCONFIGURATION config);
 void parse_argument(int c, char *value, PCONFIGURATION config);
 bool config_save(const char *filename, PCONFIGURATION config);
+void config_set_potato_profile(PCONFIGURATION config, int profile);

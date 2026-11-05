@@ -19,6 +19,8 @@
 
 #include "config.hpp"
 #include "audio/audio.h"
+#include "input/camera_stick.hpp"
+#include "potato/potato_profile.h"
 #include "system/pair_record.hpp"
 #include "util.h"
 
@@ -72,6 +74,12 @@ static struct option long_options[] = {
     {"auto_network_2nd_core", required_argument, NULL, 'P'},
     {"audio_2nd_core", required_argument, NULL, 'Q'},
     {"auto_audio_2nd_core", required_argument, NULL, 'R'},
+    {"video_2nd_core", required_argument, NULL, 'S'},
+    {"camera_mode", required_argument, NULL, 'T'},
+    {"camera_sensitivity", required_argument, NULL, 'U'},
+    {"potato_profile", required_argument, NULL, 'V'},
+    {"camera_invert", required_argument, NULL, 'W'},
+    {"bottom_screen_auto_off", required_argument, NULL, 'X'},
     {0, 0, 0, 0},
 };
 
@@ -102,6 +110,33 @@ static bool dir_has_any_file(const char *path) {
     }
     closedir(dir);
     return found;
+}
+
+static bool g_profile_from_file = false;
+
+void config_set_potato_profile(PCONFIGURATION config, int profile) {
+    if (profile < 0 || profile >= POTATO_PROFILE_COUNT) {
+        profile = POTATO_PROFILE_DEFAULT;
+    }
+    config->potato_profile = profile;
+    config->experimental_better_screen =
+        profile == POTATO_PROFILE_BETTER_SCREEN;
+    config->experimental_stable_stream = profile == POTATO_PROFILE_STABLE;
+    config->experimental_ultra_potato = profile == POTATO_PROFILE_ULTRA;
+}
+
+// same priority as the old flags had in potato_resolve_profile()
+static int profile_from_old_flags(PCONFIGURATION config) {
+    if (config->experimental_ultra_potato) {
+        return POTATO_PROFILE_ULTRA;
+    }
+    if (config->experimental_stable_stream) {
+        return POTATO_PROFILE_STABLE;
+    }
+    if (config->experimental_better_screen) {
+        return POTATO_PROFILE_BETTER_SCREEN;
+    }
+    return POTATO_PROFILE_DEFAULT;
 }
 
 void parse_argument(int c, char *value, PCONFIGURATION config) {
@@ -218,6 +253,35 @@ void parse_argument(int c, char *value, PCONFIGURATION config) {
         config->auto_audio_2nd_core =
             ((value == NULL) || (strcmp(value, "false") != 0));
         break;
+    case 'S':
+        config->video_2nd_core =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
+    case 'T':
+        config->camera_mode = atoi(value);
+        if (config->camera_mode < 0 || config->camera_mode >= CAMERA_MODE_COUNT)
+            config->camera_mode = CAMERA_TOUCH_STICK;
+        break;
+    case 'U':
+        config->camera_sensitivity = atoi(value);
+        if (config->camera_sensitivity < CAMERA_SENS_MIN ||
+            config->camera_sensitivity > CAMERA_SENS_MAX)
+            config->camera_sensitivity = CAMERA_SENS_DEFAULT;
+        break;
+    case 'V':
+        config->potato_profile = atoi(value);
+        if (config->potato_profile < 0 ||
+            config->potato_profile >= POTATO_PROFILE_COUNT)
+            config->potato_profile = POTATO_PROFILE_DEFAULT;
+        g_profile_from_file = true;
+        break;
+    case 'W':
+        config->camera_invert = atoi(value) & 3;
+        break;
+    case 'X':
+        config->bottom_screen_auto_off =
+            ((value != NULL) && (strcmp(value, "true") == 0));
+        break;
     case 1:
         if (config->action == NULL)
             config->action = value;
@@ -320,6 +384,8 @@ bool config_save(const char *filename, PCONFIGURATION config) {
     write_config_bool(fd, "usetriggersformouse",
                       config->use_triggers_for_mouse);
     write_config_bool(fd, "motion_controls", config->motion_controls);
+    write_config_int(fd, "potato_profile", config->potato_profile);
+    // still written so an older version reads a close profile
     write_config_bool(fd, "better_screen", config->experimental_better_screen);
     write_config_bool(fd, "stable_stream", config->experimental_stable_stream);
     write_config_bool(fd, "ultra_potato", config->experimental_ultra_potato);
@@ -331,6 +397,12 @@ bool config_save(const char *filename, PCONFIGURATION config) {
                       config->auto_network_2nd_core);
     write_config_bool(fd, "audio_2nd_core", config->audio_2nd_core);
     write_config_bool(fd, "auto_audio_2nd_core", config->auto_audio_2nd_core);
+    write_config_bool(fd, "video_2nd_core", config->video_2nd_core);
+    write_config_int(fd, "camera_mode", config->camera_mode);
+    write_config_int(fd, "camera_sensitivity", config->camera_sensitivity);
+    write_config_int(fd, "camera_invert", config->camera_invert);
+    write_config_bool(fd, "bottom_screen_auto_off",
+                      config->bottom_screen_auto_off);
     write_config_int(fd, "port", config->port);
     write_config_bool(fd, "autodiscover", config->autodiscover);
     write_config_bool(fd, "auto_width", config->auto_width);
@@ -397,13 +469,23 @@ void config_parse(int argc, char *argv[], PCONFIGURATION config) {
     config->auto_network_2nd_core = true;
     config->audio_2nd_core = false;
     config->auto_audio_2nd_core = true;
+    config->video_2nd_core = false;
+    config->camera_mode = CAMERA_TOUCH_STICK;
+    config->camera_sensitivity = CAMERA_SENS_DEFAULT;
+    config->camera_invert = 0;
+    config->bottom_screen_auto_off = false;
+    config->potato_profile = POTATO_PROFILE_DEFAULT;
     config->auto_width = true;
     config->auto_height = true;
     config->auto_fps = true;
     config->auto_bitrate = true;
     config->auto_packetsize = true;
 
+    g_profile_from_file = false;
     config_file_parse(config);
+    config_set_potato_profile(config, g_profile_from_file
+                                          ? config->potato_profile
+                                          : profile_from_old_flags(config));
 
     if (config->stream.bitrate == -1) {
 

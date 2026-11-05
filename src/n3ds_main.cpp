@@ -21,7 +21,9 @@
 #include "config.hpp"
 #include "input/n3ds_input.hpp"
 #include "menu_ui.hpp"
+#include "potato/potato_bench.h"
 #include "potato/potato_profile.h"
+#include "system/wake_on_lan.hpp"
 #include "system/dispatcher.hpp"
 #include "system/host_book.hpp"
 #include "system/host_discovery.hpp"
@@ -73,6 +75,8 @@ static const NumericSetting SETTING_BITRATE = {"Bitrate (kbps)", 100, 50000, 100
                                                1000};
 static const NumericSetting SETTING_PACKET = {"Packet size", 256, 2048, 4, 128};
 static const NumericSetting SETTING_PORT = {"Host port", 1, 65535, 1, 100};
+static const NumericSetting SETTING_CAMERA_SENS = {
+    "Camera sensitivity", CAMERA_SENS_MIN, CAMERA_SENS_MAX, 1, 3};
 
 static u32 *SOC_buffer = NULL;
 static bool g_ac_initialized = false;
@@ -360,15 +364,18 @@ static void draw_stream_wait_screen(PCONFIGURATION config,
 static std::string build_profile_status(PCONFIGURATION config) {
     char buffer[256];
     if (g_potato.is_potato) {
-        bool better_screen =
-            config != nullptr ? config->experimental_better_screen
-                              : g_potato.experimental_better_screen;
-        bool stable_stream =
-            config != nullptr ? config->experimental_stable_stream
-                              : g_potato.experimental_stable_stream;
-        bool ultra_potato =
-            config != nullptr ? config->experimental_ultra_potato
-                              : g_potato.experimental_ultra_potato;
+        int profile = POTATO_PROFILE_DEFAULT;
+        if (config != nullptr) {
+            profile = config->potato_profile;
+        } else if (g_potato.experimental_ultra_potato) {
+            profile = POTATO_PROFILE_ULTRA;
+        } else if (g_potato.experimental_stable_stream) {
+            profile = POTATO_PROFILE_STABLE;
+        } else if (g_potato.experimental_better_screen) {
+            profile = POTATO_PROFILE_BETTER_SCREEN;
+        } else if (g_potato.smooth) {
+            profile = POTATO_PROFILE_SMOOTH;
+        }
         const int width =
             config != nullptr ? config->stream.width : g_potato.width;
         const int height =
@@ -380,13 +387,9 @@ static std::string build_profile_status(PCONFIGURATION config) {
                                                   : g_potato.packet_size;
         const bool host_audio =
             config != nullptr ? config->localaudio : g_potato.host_audio;
-        char experimental[128];
-        snprintf(experimental, sizeof(experimental), "%s%s%s%s%s",
-                 ultra_potato ? "ultra potato auto" : "",
-                 ultra_potato && (better_screen || stable_stream) ? " + " : "",
-                 better_screen ? "better screen" : "",
-                 (better_screen && stable_stream && !ultra_potato) ? " + " : "",
-                 stable_stream ? "stable stream" : "");
+        const char *experimental = profile == POTATO_PROFILE_DEFAULT
+                                       ? ""
+                                       : potato_profile_name(profile);
 
         MenuStatus ui_status;
         ui_status.mode = "OLD 3DS";
@@ -410,14 +413,8 @@ static std::string build_profile_status(PCONFIGURATION config) {
         if (g_potato.dynamic_ultra_active) {
             ui_status.flags.push_back("emergency");
         }
-        if (ultra_potato) {
-            ui_status.flags.push_back("ultra potato auto");
-        }
-        if (better_screen) {
-            ui_status.flags.push_back("better screen");
-        }
-        if (stable_stream) {
-            ui_status.flags.push_back("stable stream");
+        if (profile != POTATO_PROFILE_DEFAULT) {
+            ui_status.flags.push_back(potato_profile_name(profile));
         }
         menu_ui_set_status(ui_status);
         snprintf(buffer, sizeof(buffer), "%s: %dx%d | %dfps | %dkbps | packet %d | audio %s%s%s",
@@ -965,20 +962,47 @@ static std::string prompt_for_text(const std::string &title,
     return std::string(buffer);
 }
 
+static void wake_host(const std::string &address, const std::string &mac) {
+    std::string error;
+    if (wol_send(address, mac, &error)) {
+        menu_ui_show_toast("Wake-up sent. Give the PC about 20 s to start, "
+                           "then connect.",
+                           5.0f);
+    } else {
+        menu_ui_show_toast("Wake-on-LAN failed: " + error, 5.0f);
+    }
+}
+
 static void prompt_for_host_options(const HostRecord &host) {
     char subtitle[192];
     snprintf(subtitle, sizeof(subtitle), "%s:%u", host.address.c_str(),
              (unsigned)host.port);
 
+    std::string mac;
+    const bool can_wake = wol_lookup(host.address, host.port, &mac);
+
     std::vector<std::string> options;
     options.push_back("Rename");
     options.push_back("Remove");
+    options.push_back(can_wake ? "Wake PC\nWake-on-LAN"
+                               : "Wake PC\tConnect once first");
 
     int idx = 0;
     while (aptMainLoop()) {
         idx = console_selection_prompt(host.name, options, idx, subtitle,
                                        build_profile_status());
         if (idx < 0) {
+            return;
+        }
+
+        if (idx == 2) {
+            if (!can_wake) {
+                menu_ui_show_toast("Connect to this PC once while it is on, "
+                                   "then it can be woken up.",
+                                   4.0f);
+                continue;
+            }
+            wake_host(host.address, mac);
             return;
         }
 
@@ -1000,7 +1024,70 @@ static void prompt_for_host_options(const HostRecord &host) {
         if (console_selection_prompt("Remove host", confirm, 0, remove_subtitle,
                                      build_profile_status()) == 1) {
             host_book_remove(host.address, host.port);
+            wol_forget(host.address, host.port);
             return;
+        }
+    }
+}
+
+struct BenchTask {
+    std::string report;
+    int frame = 0;
+};
+
+// runs on the benchmark thread, between two timed frames
+static bool bench_progress(int done, int total, void *context) {
+    int *frame = &static_cast<BenchTask *>(context)->frame;
+    hidScanInput();
+    if (hidKeysDown() & KEY_B) {
+        return false;
+    }
+    if (menu_ui_is_active()) {
+        menu_ui_draw_loading("Decode benchmark",
+                             "Decoding frame " + std::to_string(done) +
+                                 " of " + std::to_string(total) +
+                                 ".\nThe recording is decoded as fast as "
+                                 "possible.",
+                             build_profile_status(), "B: stop", (*frame)++);
+    }
+    return true;
+}
+
+static void bench_thread_entry(void *arg) {
+    BenchTask *task = static_cast<BenchTask *>(arg);
+    potato_bench_run(&task->report, bench_progress, task);
+}
+
+static void run_decode_benchmark() {
+    wait_for_all_buttons_release();
+    BenchTask task;
+    // the H.264 decoder overflows the 32 KB main stack, so it gets the same
+    // 256 KB as the moonlight threads. Main just waits, the thread draws.
+    s32 priority = 0x30;
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    Thread worker = threadCreate(bench_thread_entry, &task, 0x40000, priority,
+                                 -1, false);
+    if (worker == nullptr) {
+        task.report = "Could not start the benchmark thread.";
+    } else {
+        threadJoin(worker, U64_MAX);
+        threadFree(worker);
+    }
+    const std::string &report = task.report;
+    printf("[BENCH] %s\n", report.c_str());
+
+    wait_for_all_buttons_release();
+    while (aptMainLoop()) {
+        if (menu_ui_is_active()) {
+            menu_ui_draw_message("Decode benchmark",
+                                 report + "\nSaved in " STREAMPOTATO_3DS_PATH
+                                          "/bench.txt",
+                                 build_profile_status(), "Press any button");
+        }
+        gspWaitForVBlank();
+        hidScanInput();
+        if (hidKeysDown()) {
+            break;
         }
     }
 }
@@ -1008,10 +1095,16 @@ static void prompt_for_host_options(const HostRecord &host) {
 static void prompt_for_app_settings(PCONFIGURATION config) {
     int idx = 0;
     while (aptMainLoop()) {
+        std::string dump_info;
+        const bool has_dump = potato_bench_dump_info(&dump_info);
         std::vector<std::string> options = {
             "Host port\t" + std::to_string(config->port),
             std::string("Auto-detect hosts: ") +
                 (config->autodiscover ? "enabled" : "disabled"),
+            std::string("Record next stream: ") +
+                (potato_bench_record_requested() ? "enabled" : "disabled"),
+            std::string("Decode benchmark\n") +
+                (has_dump ? dump_info : "Record a stream first"),
         };
         idx = console_selection_prompt("Settings", options, idx,
                                        "Applies to every host in the list.",
@@ -1023,11 +1116,21 @@ static void prompt_for_app_settings(PCONFIGURATION config) {
         if (idx == 0) {
             config->port =
                 (unsigned short)prompt_for_number(SETTING_PORT, config->port);
-        } else {
+        } else if (idx == 1) {
             config->autodiscover = prompt_for_boolean(
                 "Scan the local network for Sunshine PCs when the host list "
                 "opens",
                 config->autodiscover);
+        } else if (idx == 2) {
+            potato_bench_request_record(prompt_for_boolean(
+                "Record Next Stream\nSaves the video of the next stream "
+                "(up to 2 min) to the SD card for the decode benchmark.",
+                potato_bench_record_requested()));
+        } else if (!has_dump) {
+            menu_ui_show_toast("Turn on Record next stream, then stream for "
+                               "a minute.");
+        } else {
+            run_decode_benchmark();
         }
     }
 
@@ -1092,7 +1195,8 @@ static std::string prompt_for_address(PCONFIGURATION config,
             "Select a host", options, selected,
             hosts.empty()
                 ? "No host yet. Pick Add a host to enter an IP."
-                : "PotatoStream v1.3.0",
+                : std::string("PotatoStream v") +
+                      update_check_current_version(),
             build_profile_status(config),
             "D-Pad: move   A: connect   Right: options", &row_actions,
             &open_options, &refreshed);
@@ -1162,6 +1266,71 @@ prompt_for_video_decoder(VIDEO_DECODER_TYPE default_val) {
     return (VIDEO_DECODER_TYPE)idx;
 }
 
+// right stick of the touch gamepad, for consoles without a C-Stick
+static int prompt_for_camera_mode(int default_val) {
+    std::vector<std::string> options;
+    for (int mode = 0; mode < CAMERA_MODE_COUNT; mode++) {
+        options.push_back(camera_mode_name(mode));
+    }
+    int idx = console_selection_prompt(
+        "Camera stick (touch gamepad)", options, default_val,
+        "Stick: the finger sets the tilt, hold it to keep turning. Swipe: "
+        "the camera follows the finger like a mouse. Gyro: tilt the console "
+        "too, so the right thumb stays on the buttons.",
+        build_profile_status());
+    if (idx < 0) {
+        return default_val;
+    }
+    return idx;
+}
+
+static const char *camera_invert_name(int invert) {
+    switch (invert & 3) {
+    case 1:
+        return "X";
+    case 2:
+        return "Y";
+    case 3:
+        return "X and Y";
+    default:
+        return "Off";
+    }
+}
+
+static int prompt_for_camera_invert(int default_val) {
+    std::vector<std::string> options;
+    for (int i = 0; i < 4; i++) {
+        options.push_back(i == 0 ? std::string("Off")
+                                 : std::string("Invert ") +
+                                       camera_invert_name(i));
+    }
+    int idx = console_selection_prompt(
+        "Invert camera", options, default_val & 3,
+        "Touch and gyro camera only. Invert Y: drag or tilt up to look down.",
+        build_profile_status());
+    if (idx < 0) {
+        return default_val;
+    }
+    return idx;
+}
+
+static int prompt_for_potato_profile(int default_val) {
+    std::vector<std::string> options;
+    for (int p = 0; p < POTATO_PROFILE_COUNT; p++) {
+        options.push_back(potato_profile_name(p));
+    }
+    int idx = console_selection_prompt(
+        "Stream profile", options, default_val,
+        "Default 320x192 20 fps. Better screen 400x240 15 fps, sharper. "
+        "Smooth 320x192 30 fps (experimental). Stable 15 fps, drops late "
+        "frames sooner. Ultra potato 12 fps, for weak Wi-Fi.",
+        build_profile_status());
+    if (idx < 0) {
+        return default_val;
+    }
+    return idx;
+}
+
 static bool prompt_for_boolean(std::string prompt, bool default_val) {
     std::vector<std::string> options = {
         "Enabled",
@@ -1175,8 +1344,35 @@ static bool prompt_for_boolean(std::string prompt, bool default_val) {
     return idx == 0;
 }
 
+static bool network_2nd_core_enabled(PCONFIGURATION config) {
+    if (g_potato.is_potato) {
+        return false;
+    }
+    return config->auto_network_2nd_core ? true : config->network_2nd_core;
+}
+
+static bool audio_2nd_core_enabled(PCONFIGURATION config) {
+    if (config->localaudio) {
+        return false;
+    }
+    if (config->auto_audio_2nd_core) {
+        return g_potato.is_potato && !network_2nd_core_enabled(config);
+    }
+    return config->audio_2nd_core;
+}
+
+static bool is_2nd_core_setting(const std::string &key) {
+    return key == "network_2nd_core" || key == "audio_2nd_core";
+}
 
 static bool *auto_flag_for(PCONFIGURATION config, const std::string &key) {
+    // both models, depends on the console
+    if (key == "network_2nd_core") {
+        return &config->auto_network_2nd_core;
+    }
+    if (key == "audio_2nd_core") {
+        return &config->auto_audio_2nd_core;
+    }
     if (!g_potato.is_potato) {
         return nullptr;
     }
@@ -1218,32 +1414,47 @@ static int stream_value_for(PCONFIGURATION config, const std::string &key) {
 }
 
 static void prompt_for_stream_settings(PCONFIGURATION config) {
-    std::vector<std::string> setting_keys = {
-        "width",         "height",        "fps",
-        "bitrate",       "packetsize",    "sops",
-        "localaudio",    "quitappafter",  "viewonly",
-        "video_decoder", "better_screen", "stable_stream",
-        "ultra_potato",  "motion_controls",
-        "swapfacebuttons",               "swaptriggersandshoulders",
-        "usetriggersformouse",
-    };
+    auto on_off = [](bool v) { return v ? "enabled" : "disabled"; };
     int idx = 0;
     while (1) {
-        std::vector<std::string> setting_names = {
-            // A tab splits the label from its value, drawn as a pill
-            "Width\t" + std::to_string(config->stream.width),
-            "Height\t" + std::to_string(config->stream.height),
-            "FPS\t" + std::to_string(config->stream.fps),
-            "Bitrate\t" + std::to_string(config->stream.bitrate) + " kbps",
-            "Packet size\t" + std::to_string(config->stream.packetSize),
-            std::string("Optimize game settings: ") +
-                (config->sops ? "enabled" : "disabled"),
-            std::string("Audio on host only: ") +
-                (config->localaudio ? "enabled" : "disabled"),
-            std::string("Quit host app after stream: ") +
-                (config->quitappafter ? "enabled" : "disabled"),
-            std::string("View only mode: ") +
-                (config->viewonly ? "enabled" : "disabled"),
+        // key and label, in menu order. A tab separates the label from the
+        // value (drawn as a pill)
+        std::vector<std::pair<std::string, std::string>> rows;
+        auto add = [&rows](const char *key, const std::string &label) {
+            rows.emplace_back(key, label);
+        };
+        if (g_potato.is_potato) {
+            add("potato_profile",
+                std::string("Stream profile\t") +
+                    potato_profile_name(config->potato_profile));
+        }
+        add("width", "Width\t" + std::to_string(config->stream.width));
+        add("height", "Height\t" + std::to_string(config->stream.height));
+        add("fps", "FPS\t" + std::to_string(config->stream.fps));
+        add("bitrate",
+            "Bitrate\t" + std::to_string(config->stream.bitrate) + " kbps");
+        add("packetsize",
+            "Packet size\t" + std::to_string(config->stream.packetSize));
+        if (!g_potato.is_potato) {
+            add("network_2nd_core",
+                std::string("Network on 2nd core: ") +
+                    on_off(network_2nd_core_enabled(config)));
+        }
+        add("sops",
+            std::string("Optimize game settings: ") + on_off(config->sops));
+        add("localaudio", std::string("Audio on host only: ") +
+                              on_off(config->localaudio));
+        add("audio_2nd_core",
+            config->localaudio
+                ? std::string("Audio on 2nd core\tLocked\nAudio plays on the "
+                              "host")
+                : std::string("Audio on 2nd core: ") +
+                      on_off(audio_2nd_core_enabled(config)));
+        add("quitappafter", std::string("Quit host app after stream: ") +
+                                on_off(config->quitappafter));
+        add("viewonly",
+            std::string("View only mode: ") + on_off(config->viewonly));
+        add("video_decoder",
             std::string("Video decoder\t") +
                 (config->video_decoder ==
                          VIDEO_DECODER_TYPE::HARDWARE_VIDEO_DECODER
@@ -1251,22 +1462,40 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
                  : config->video_decoder ==
                          VIDEO_DECODER_TYPE::SOFTWARE_VIDEO_DECODER
                      ? "Software"
-                     : "Off"),
-            std::string("Experimental better screen: ") +
-                (config->experimental_better_screen ? "enabled" : "disabled"),
-            std::string("Experimental stable stream: ") +
-                (config->experimental_stable_stream ? "enabled" : "disabled"),
-            std::string("Experimental ultra potato: ") +
-                (config->experimental_ultra_potato ? "enabled" : "disabled"),
-            std::string("Motion controls: ") +
-                (config->motion_controls ? "enabled" : "disabled"),
-            std::string("Swap face buttons: ") +
-                (config->swap_face_buttons ? "enabled" : "disabled"),
+                     : "Off"));
+        add("motion_controls", std::string("Motion controls: ") +
+                                   on_off(config->motion_controls));
+        add("swapfacebuttons", std::string("Swap face buttons: ") +
+                                   on_off(config->swap_face_buttons));
+        add("swaptriggersandshoulders",
             std::string("Swap triggers and shoulders: ") +
-                (config->swap_triggers_and_shoulders ? "enabled" : "disabled"),
-            std::string("Triggers as mouse buttons: ") +
-                (config->use_triggers_for_mouse ? "enabled" : "disabled"),
-        };
+                on_off(config->swap_triggers_and_shoulders));
+        add("usetriggersformouse", std::string("Triggers as mouse buttons: ") +
+                                       on_off(config->use_triggers_for_mouse));
+        add("camera_mode", std::string("Camera stick: ") +
+                               camera_mode_name(config->camera_mode));
+        add("camera_sensitivity",
+            "Camera sensitivity\t" +
+                std::to_string(config->camera_sensitivity));
+        add("camera_invert", std::string("Invert camera\t") +
+                                 camera_invert_name(config->camera_invert));
+        add("bottom_screen_auto_off",
+            std::string("Bottom screen auto-off: ") +
+                on_off(config->bottom_screen_auto_off));
+        if (!g_potato.is_potato) {
+            add("color_24bit", std::string("Experimental 24-bit color: ") +
+                                   on_off(config->color_24bit));
+        } else {
+            add("video_2nd_core",
+                std::string("Experimental video on 2nd core: ") +
+                    on_off(config->video_2nd_core));
+        }
+        std::vector<std::string> setting_keys;
+        std::vector<std::string> setting_names;
+        for (const auto &row : rows) {
+            setting_keys.push_back(row.first);
+            setting_names.push_back(row.second);
+        }
         std::vector<MenuRowAction> row_actions;
         for (const auto &key : setting_keys) {
             MenuRowAction action;
@@ -1274,6 +1503,10 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
             if (flag != nullptr) {
                 action.label = "AUTO";
                 action.active = *flag;
+            }
+            if (key == "audio_2nd_core" && config->localaudio) {
+                action = MenuRowAction();
+                action.locked = true;
             }
             row_actions.push_back(action);
         }
@@ -1286,18 +1519,15 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
                        "or 320.";
         } else if (config->stream.height % GSP_SCREEN_WIDTH &&
                    !(g_potato.is_potato &&
-                     (config->stream.height == POTATO_HEIGHT ||
-                      config->stream.height == POTATO_BETTER_HEIGHT))) {
+                     config->stream.height == POTATO_HEIGHT)) {
             subtitle = "Unsupported height: the 3DS expects 240 lines, or "
-                       "180 / 225 in fill modes.";
+                       "192 in Potato modes.";
         } else if (g_potato.is_potato) {
             subtitle = "AUTO: follows the Old 3DS profile.";
         } else {
             subtitle = "Adjust the stream profile.";
         }
-        if (g_potato.is_potato) {
-            footer_hint = "D-Pad: move   A: edit   Right: AUTO";
-        }
+        footer_hint = "D-Pad: move   A: edit   Right: AUTO";
 
         bool toggle_auto = false;
         idx = console_selection_prompt("Stream settings", setting_names,
@@ -1308,10 +1538,23 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
             break;
         }
 
+        if (setting_keys[idx] == "audio_2nd_core" && config->localaudio) {
+            menu_ui_show_toast("Locked: turn off Audio on host only first.");
+            continue;
+        }
+
         bool *auto_flag = auto_flag_for(config, setting_keys[idx]);
         if (auto_flag != nullptr && toggle_auto) {
+            // leaving AUTO keeps the current value
+            if (setting_keys[idx] == "network_2nd_core") {
+                config->network_2nd_core = network_2nd_core_enabled(config);
+            } else if (setting_keys[idx] == "audio_2nd_core") {
+                config->audio_2nd_core = audio_2nd_core_enabled(config);
+            }
             *auto_flag = !*auto_flag;
-            if (*auto_flag) {
+            if (*auto_flag && is_2nd_core_setting(setting_keys[idx])) {
+                menu_ui_show_toast("AUTO on: picked for this console.");
+            } else if (*auto_flag) {
                 potato_apply_config(config);
                 menu_ui_show_toast("AUTO on: value follows the Old 3DS "
                                    "profile.");
@@ -1358,31 +1601,10 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
         } else if ("video_decoder" == setting_keys[idx]) {
             config->video_decoder =
                 prompt_for_video_decoder(config->video_decoder);
-        } else if ("better_screen" == setting_keys[idx]) {
-            config->experimental_better_screen = prompt_for_boolean(
-                "Experimental Better Screen\nSharper profile with zoom-to-fill "
-                "crop on the top screen. Costs more decode time.",
-                config->experimental_better_screen);
-            if (g_potato.is_potato) {
-                potato_apply_config(config);
-            }
-        } else if ("stable_stream" == setting_keys[idx]) {
-            config->experimental_stable_stream = prompt_for_boolean(
-                "Experimental Stable Stream\nLower FPS and more aggressive "
-                "late-frame dropping to reduce freezes.",
-                config->experimental_stable_stream);
-            if (g_potato.is_potato) {
-                potato_apply_config(config);
-            }
-        } else if ("ultra_potato" == setting_keys[idx]) {
-            config->experimental_ultra_potato = prompt_for_boolean(
-                "Experimental Ultra Potato\nStarts on an ultra-low profile "
-                "and automatically hardens frame skipping when slow frames "
-                "pile up live.",
-                config->experimental_ultra_potato);
-            if (g_potato.is_potato) {
-                potato_apply_config(config);
-            }
+        } else if ("potato_profile" == setting_keys[idx]) {
+            config_set_potato_profile(
+                config, prompt_for_potato_profile(config->potato_profile));
+            potato_apply_config(config);
         } else if ("swapfacebuttons" == setting_keys[idx]) {
             config->swap_face_buttons = prompt_for_boolean(
                 "Swaps A/B and X/Y to match Xbox controller layout",
@@ -1395,6 +1617,54 @@ static void prompt_for_stream_settings(PCONFIGURATION config) {
             config->use_triggers_for_mouse =
                 prompt_for_boolean("Use ZL/ZR as left/right mouse buttons",
                                    config->use_triggers_for_mouse);
+        } else if ("network_2nd_core" == setting_keys[idx]) {
+            const bool before = network_2nd_core_enabled(config);
+            const bool chosen = prompt_for_boolean(
+                "Network on 2nd Core\nReceives the video on another core "
+                "while this one decodes it.",
+                before);
+            if (chosen != before) {
+                config->network_2nd_core = chosen;
+                config->auto_network_2nd_core = false;
+                menu_ui_show_toast("AUTO off: value set manually.");
+            }
+        } else if ("audio_2nd_core" == setting_keys[idx]) {
+            const bool before = audio_2nd_core_enabled(config);
+            const bool chosen = prompt_for_boolean(
+                "Audio on 2nd Core\nDecodes the sound on another core, leaving "
+                "this one to the video.",
+                before);
+            if (chosen != before) {
+                config->audio_2nd_core = chosen;
+                config->auto_audio_2nd_core = false;
+                menu_ui_show_toast("AUTO off: value set manually.");
+            }
+        } else if ("video_2nd_core" == setting_keys[idx]) {
+            config->video_2nd_core = prompt_for_boolean(
+                "Experimental Video on 2nd Core\nDecodes part of each frame "
+                "on the 2nd core. The PC sends 4 slices per frame instead of "
+                "1, and core 1 may use up to 80% of its time.",
+                config->video_2nd_core);
+        } else if ("camera_mode" == setting_keys[idx]) {
+            config->camera_mode = prompt_for_camera_mode(config->camera_mode);
+        } else if ("camera_sensitivity" == setting_keys[idx]) {
+            config->camera_sensitivity = prompt_for_number(
+                SETTING_CAMERA_SENS, config->camera_sensitivity);
+        } else if ("camera_invert" == setting_keys[idx]) {
+            config->camera_invert =
+                prompt_for_camera_invert(config->camera_invert);
+        } else if ("bottom_screen_auto_off" == setting_keys[idx]) {
+            config->bottom_screen_auto_off = prompt_for_boolean(
+                "Bottom Screen Auto-off\nTurns the bottom screen light off "
+                "after 10 s without touch in Gamepad and Mouse modes, to save "
+                "battery. Touch it to turn it back on.",
+                config->bottom_screen_auto_off);
+        } else if ("color_24bit" == setting_keys[idx]) {
+            config->color_24bit = prompt_for_boolean(
+                "Experimental 24-bit Color\nHardware decoder only. Smoother "
+                "gradients, not yet tested: turn it off if colors look wrong "
+                "or no picture shows up.",
+                config->color_24bit);
         }
 
         if (auto_flag != nullptr && *auto_flag &&
@@ -1421,6 +1691,8 @@ static void init_3ds() {
     consoleInit(GFX_TOP, &DebugTouchHandler::topScreen);
     consoleInit(GFX_BOTTOM, &DebugTouchHandler::bottomScreen);
     consoleSelect(&DebugTouchHandler::topScreen);
+    menu_ui_set_consoles(&DebugTouchHandler::topScreen,
+                         &DebugTouchHandler::bottomScreen);
     menu_ui_init();
     atexit(n3ds_exit_handler);
 
@@ -1623,12 +1895,10 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
     case (VIDEO_DECODER_TYPE::SOFTWARE_VIDEO_DECODER):
         if (!g_potato.is_potato) {
             decoder_callbacks_n3ds.capabilities =
-                CAPABILITY_DIRECT_SUBMIT |
                 CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC |
                 CAPABILITY_SLICES_PER_FRAME(2);
         } else {
             decoder_callbacks_n3ds.capabilities =
-                CAPABILITY_DIRECT_SUBMIT |
                 CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC;
         }
         video_callbacks =
@@ -1649,6 +1919,47 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
         config->video_decoder, config->swap_face_buttons,
         config->swap_triggers_and_shoulders, config->use_triggers_for_mouse,
         config->motion_controls);
+
+    // Old 3DS: part of each frame decoded on core 1. The encoder is asked
+    // for 4 slices, so the helper thread and this one can share them
+    // unevenly (core 1 is slower: time limit, audio)
+    g_potato_video_2nd_core = g_potato.is_potato && config->video_2nd_core &&
+                              video_callbacks == &decoder_callbacks_potato;
+    if (video_callbacks == &decoder_callbacks_potato) {
+        video_callbacks->capabilities &= ~CAPABILITY_SLICES_PER_FRAME(0xFF);
+        if (g_potato_video_2nd_core) {
+            video_callbacks->capabilities |= CAPABILITY_SLICES_PER_FRAME(4);
+        }
+    }
+
+    // without direct submit, receiving gets its own thread on a 2nd core
+    // (core 1 on Old 3DS, core 2 on New 3DS)
+    if (network_2nd_core_enabled(config)) {
+        video_callbacks->capabilities &= ~CAPABILITY_DIRECT_SUBMIT;
+        n3ds_video_recv_core = g_potato.is_potato ? 1 : 2;
+    } else {
+        video_callbacks->capabilities |= CAPABILITY_DIRECT_SUBMIT;
+        n3ds_video_recv_core = -1;
+    }
+    g_video_direct_submit =
+        (video_callbacks->capabilities & CAPABILITY_DIRECT_SUBMIT) != 0;
+
+    // same for audio: "AudioDec" decodes on the 2nd core
+    if (audio_callbacks == &audio_callbacks_n3ds &&
+        audio_2nd_core_enabled(config)) {
+        audio_callbacks_n3ds.capabilities &= ~CAPABILITY_DIRECT_SUBMIT;
+        n3ds_audio_dec_core = g_potato.is_potato ? 1 : 2;
+    } else {
+        audio_callbacks_n3ds.capabilities |= CAPABILITY_DIRECT_SUBMIT;
+        n3ds_audio_dec_core = -1;
+    }
+    // Old 3DS: 20 ms audio packets, half the packets to receive and decode
+    if (g_potato.is_potato) {
+        audio_callbacks_n3ds.capabilities |= CAPABILITY_LONG_AUDIO_PACKETS;
+    } else {
+        audio_callbacks_n3ds.capabilities &= ~CAPABILITY_LONG_AUDIO_PACKETS;
+    }
+    g_mvd_color_24bit = !g_potato.is_potato && config->color_24bit;
 
     auto connection_listener =
         N3dsConnectionListener::create_instance(config->motion_controls);
@@ -1680,7 +1991,9 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, int appId,
         build_stream_end_message(connection_listener);
     const int stream_end_error = connection_listener->get_last_error_code();
 
+    printf("Stopping the connection...\n");
     LiStopConnection();
+    printf("Connection stopped\n");
     N3dsConnectionListener::destroy_instance();
     menu_ui_init();
 
@@ -1750,6 +2063,7 @@ static int init_server(CONFIGURATION *config, SERVER_DATA *server) {
     } else {
         remove_pair_address(config->address, config->port);
     }
+    wol_remember(config->address, config->port, server->mac);
     return 0;
 }
 
@@ -1770,7 +2084,9 @@ static void action_stream(CONFIGURATION *config, SERVER_DATA *server) {
     std::shared_ptr<N3dsInput> input_handler = std::make_shared<N3dsInput>(
         config->stream.width, config->stream.height, config->swap_face_buttons,
         config->swap_triggers_and_shoulders, config->use_triggers_for_mouse,
-        config->viewonly);
+        config->viewonly, config->camera_mode,
+        config->camera_sensitivity, config->camera_invert,
+        config->bottom_screen_auto_off);
     stream(server, config, appId, input_handler);
 }
 
@@ -1868,6 +2184,22 @@ int main_loop(int argc, char *argv[]) {
         potato_apply_config(&config);
     }
 
+    // dev hook: an "autobench" file on the SD card runs the decode benchmark
+    // once, without the menu, then quits (used to drive it from an emulator)
+    if (remove(STREAMPOTATO_3DS_PATH "/autobench") == 0) {
+        BenchTask task;
+        s32 priority = 0x30;
+        svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+        Thread worker = threadCreate(bench_thread_entry, &task, 0x40000,
+                                     priority, -1, false);
+        if (worker != nullptr) {
+            threadJoin(worker, U64_MAX);
+            threadFree(worker);
+        }
+        printf("[BENCH] %s\n", task.report.c_str());
+        return 0;
+    }
+
     background_start(update_check_task, &g_update_result,
                      on_update_check_done);
 
@@ -1911,8 +2243,24 @@ int main_loop(int argc, char *argv[]) {
                              build_profile_status(&config),
                              "Connecting to the selected IP/host",
                              init_server_task, &init_context)) {
+            std::string mac;
+            if (wol_lookup(address_string, connection_port, &mac)) {
+                std::vector<std::string> options = {
+                    "Wake PC\nWake-on-LAN, then connect again",
+                    "Back",
+                };
+                if (console_selection_prompt(
+                        "Host not reachable", options, 0,
+                        "If the PC is off or asleep, PotatoStream can wake "
+                        "it up (Wake-on-LAN must be on in its BIOS / network "
+                        "adapter).",
+                        build_profile_status(&config)) == 0) {
+                    wake_host(address_string, mac);
+                }
+            } else {
+                wait_for_button();
+            }
             config.port = saved_port;
-            wait_for_button();
             continue;
         }
 
