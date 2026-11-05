@@ -21,35 +21,86 @@
 #include <Limelight.h>
 #include <cstring>
 
-GamepadTouchHandler::GamepadTouchHandler(GAMEPAD_STATE *gamepad_in)
-    : gamepad_state(gamepad_in) {}
+#define BUTTON_ROW_HEIGHT 56
+#define BUTTON_WIDTH 64
+
+static uint64_t now_us() {
+    return (uint64_t)(svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000.0));
+}
+
+GamepadTouchHandler::GamepadTouchHandler(GAMEPAD_STATE *gamepad_in,
+                                         int camera_mode, int camera_sens)
+    : gamepad_state(gamepad_in) {
+    camera.configure(camera_mode_is_swipe(camera_mode), camera_sens);
+    _publish();
+}
+
+GamepadTouchHandler::~GamepadTouchHandler() {
+    held_key = 0;
+    held_button = 0;
+    r3_hold = false;
+    camera.end();
+    _publish();
+}
+
+void GamepadTouchHandler::_publish() {
+    gamepad_state->touch_keys = held_key;
+    gamepad_state->touch_buttons = held_button | (r3_hold ? RS_CLK_FLAG : 0);
+    gamepad_state->touch_stick = camera.active() && !r3_hold;
+    gamepad_state->touch_rx = gamepad_state->touch_stick ? camera.x() : 0.0f;
+    gamepad_state->touch_ry = gamepad_state->touch_stick ? camera.y() : 0.0f;
+}
 
 void GamepadTouchHandler::_handle_touch_down(touchPosition touch) {
-    if (touch.py >= 120) {
-        gamepad_state->buttons |= SPECIAL_FLAG;
-        return;
-    }
+    held_key = 0;
+    held_button = 0;
+    on_camera = false;
+    r3_hold = false;
 
-    if (touch.px < 235)
-        gamepad_state->buttons |= LS_CLK_FLAG;
-    if (touch.px > 104)
-        gamepad_state->buttons |= RS_CLK_FLAG;
+    if (touch.py < BUTTON_ROW_HEIGHT) {
+        switch (touch.px / BUTTON_WIDTH) {
+        case 0:
+            held_key = KEY_ZL;
+            break;
+        case 1:
+            held_button = LS_CLK_FLAG;
+            break;
+        case 2:
+            held_button = SPECIAL_FLAG;
+            break;
+        case 3:
+            held_button = RS_CLK_FLAG;
+            break;
+        default:
+            held_key = KEY_ZR;
+            break;
+        }
+    } else {
+        const uint64_t t = now_us();
+        on_camera = true;
+        r3_hold = double_tap.down(touch.px, touch.py, t);
+        camera.begin(touch.px, touch.py, t);
+    }
+    _publish();
 }
 
 void GamepadTouchHandler::_handle_touch_up(touchPosition touch) {
-    gamepad_state->buttons &= ~(SPECIAL_FLAG | LS_CLK_FLAG | RS_CLK_FLAG);
+    if (on_camera) {
+        double_tap.up(now_us());
+    }
+    held_key = 0;
+    held_button = 0;
+    on_camera = false;
+    r3_hold = false;
+    camera.end();
+    _publish();
 }
 
 void GamepadTouchHandler::_handle_touch_hold(touchPosition touch) {
-    gamepad_state->buttons &= ~(SPECIAL_FLAG | LS_CLK_FLAG | RS_CLK_FLAG);
-
-    if (touch.py >= 120) {
-        gamepad_state->buttons |= SPECIAL_FLAG;
+    if (!on_camera) {
         return;
     }
-
-    if (touch.px < 235)
-        gamepad_state->buttons |= LS_CLK_FLAG;
-    if (touch.px > 104)
-        gamepad_state->buttons |= RS_CLK_FLAG;
+    double_tap.move(touch.px, touch.py);
+    camera.move(touch.px, touch.py, now_us());
+    _publish();
 }

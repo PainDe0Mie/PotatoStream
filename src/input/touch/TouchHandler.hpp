@@ -20,6 +20,7 @@
 
 #include "../../system/message.hpp"
 #include "keycode_map.hpp"
+#include "../camera_stick.hpp"
 #include <3ds.h>
 #include <memory>
 
@@ -37,6 +38,10 @@ typedef struct _GAMEPAD_STATE {
     float gyro_rate_x = 0;
     float gyro_rate_y = 0;
     float gyro_rate_z = 0;
+    u32 touch_keys = 0;    // ZL / ZR
+    int touch_buttons = 0; // L3, R3, Home
+    bool touch_stick = false;
+    float touch_rx = 0, touch_ry = 0;
 } GAMEPAD_STATE;
 
 class TouchHandlerBase {
@@ -86,8 +91,9 @@ class MenuTouchHandler : public TouchHandlerBase {
 
 class GamepadTouchHandler : public TouchHandlerBase {
   public:
-    GamepadTouchHandler(GAMEPAD_STATE *gamepad_in);
-    ~GamepadTouchHandler() = default;
+    GamepadTouchHandler(GAMEPAD_STATE *gamepad_in, int camera_mode,
+                        int camera_sens);
+    ~GamepadTouchHandler();
 
   private:
     void _handle_touch_down(touchPosition touch) override;
@@ -95,7 +101,16 @@ class GamepadTouchHandler : public TouchHandlerBase {
     void _handle_touch_hold(touchPosition touch) override;
 
   private:
+    void _publish();
+
+  private:
     GAMEPAD_STATE *gamepad_state;
+    TouchCameraStick camera;
+    DoubleTapDetector double_tap;
+    u32 held_key = 0;    // button picked at touch down
+    int held_button = 0;
+    bool on_camera = false;
+    bool r3_hold = false;
 };
 
 class MouseTouchHandler : public TouchHandlerBase {

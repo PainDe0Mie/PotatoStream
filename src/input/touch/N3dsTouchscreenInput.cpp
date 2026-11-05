@@ -20,12 +20,44 @@
 #include "N3dsTouchscreenInput.hpp"
 #include "../../system/dispatcher.hpp"
 
+#define BACKLIGHT_IDLE_SECONDS 10
+
+static volatile bool g_backlight_resync = false;
+static aptHookCookie g_backlight_hook;
+
+static void backlight_apt_hook(APT_HookType hook, void *param) {
+    (void)param;
+    switch (hook) {
+    case APTHOOK_ONSUSPEND:
+    case APTHOOK_ONSLEEP:
+    case APTHOOK_ONEXIT:
+        GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTTOM);
+        g_backlight_resync = true;
+        break;
+    case APTHOOK_ONRESTORE:
+    case APTHOOK_ONWAKEUP:
+        g_backlight_resync = true;
+        break;
+    default:
+        break;
+    }
+}
+
 N3dsTouchscreenInput::N3dsTouchscreenInput(GAMEPAD_STATE *gamepad_in,
                                            int image_width_in,
                                            int image_height_in,
-                                           bool view_only_in)
+                                           bool view_only_in,
+                                           int camera_mode_in,
+                                           int camera_sens_in,
+                                           bool bottom_auto_off_in)
     : gamepad_state(gamepad_in), image_width(image_width_in),
-      image_height(image_height_in), view_only(view_only_in) {
+      image_height(image_height_in), view_only(view_only_in),
+      camera_mode(camera_mode_in), camera_sens(camera_sens_in) {
+    if (bottom_auto_off_in && R_SUCCEEDED(gspLcdInit())) {
+        bottom_auto_off = true;
+        g_backlight_resync = false;
+        aptHook(&g_backlight_hook, backlight_apt_hook, nullptr);
+    }
     MessageDispatcher::get_instance()->subscribe(
         MessageType::TOUCH_STATE_CHANGED, this);
 };
@@ -33,6 +65,39 @@ N3dsTouchscreenInput::N3dsTouchscreenInput(GAMEPAD_STATE *gamepad_in,
 N3dsTouchscreenInput::~N3dsTouchscreenInput() {
     MessageDispatcher::get_instance()->unsubscribe(
         MessageType::TOUCH_STATE_CHANGED, this);
+    if (bottom_auto_off) {
+        aptUnhook(&g_backlight_hook);
+        GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTTOM);
+        gspLcdExit();
+    }
+}
+
+void N3dsTouchscreenInput::_update_backlight(bool touching) {
+    if (!bottom_auto_off) {
+        return;
+    }
+    const u64 now = svcGetSystemTick();
+    if (g_backlight_resync) {
+        g_backlight_resync = false;
+        backlight_on = false; 
+        last_activity_tick = now;
+    }
+
+    const bool may_dim = touch_type == N3dsTouchType::GAMEPAD ||
+                         touch_type == N3dsTouchType::MOUSEPAD;
+    if (!may_dim || touching || last_activity_tick == 0) {
+        last_activity_tick = now;
+    }
+    const bool want_on =
+        now - last_activity_tick < (u64)BACKLIGHT_IDLE_SECONDS * SYSCLOCK_ARM11;
+    if (want_on != backlight_on) {
+        if (want_on) {
+            GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTTOM);
+        } else {
+            GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTTOM);
+        }
+        backlight_on = want_on;
+    }
 }
 
 void N3dsTouchscreenInput::accept(IMessage *msg) {
@@ -47,7 +112,8 @@ void N3dsTouchscreenInput::accept(IMessage *msg) {
 void N3dsTouchscreenInput::_n3dsinput_set_touch(N3dsTouchType touch_type_in) {
     switch (touch_type_in) {
     case N3dsTouchType::GAMEPAD:
-        handler = std::make_unique<GamepadTouchHandler>(gamepad_state);
+        handler = std::make_unique<GamepadTouchHandler>(gamepad_state, camera_mode,
+                                                        camera_sens);
         break;
     case N3dsTouchType::MOUSEPAD:
         handler = std::make_unique<MouseTouchHandler>();
@@ -82,6 +148,7 @@ void N3dsTouchscreenInput::n3dsinput_handle_touch(u32 kDown, u32 kUp) {
     if (next_touch_type.load() != touch_type) {
         _n3dsinput_set_touch(next_touch_type.load());
     }
+    _update_backlight((hidKeysHeld() & KEY_TOUCH) != 0);
 
     if (handler == nullptr) {
         return;
