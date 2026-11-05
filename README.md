@@ -52,7 +52,6 @@ Or scan the QR code with FBI:
 
 <img width="272" height="270" alt="qrcode" src="https://github.com/user-attachments/assets/54e4f856-1402-4d58-b7bc-38f57bb0c152" />
 
-
 ---
 
 ## First time setup
