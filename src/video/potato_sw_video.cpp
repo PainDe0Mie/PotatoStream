@@ -1,12 +1,8 @@
-// potato_sw_video.cpp
-//   - frame skip intelligent (potato_profile)
-//   - stats perf
-//   - Y2RU hardware
-//   - no swscale
-
 #include "potato_sw_video.h"
 
 #include "ffmpeg.h"
+
+#include "../potato/potato_bench.h"
 
 #include "../util.h"
 
@@ -19,16 +15,35 @@
 #define SLICES_PER_FRAME 1
 #define N3DS_BUFFER_FRAMES 1
 
+#ifndef POTATO_ASYNC_PRESENT
+#define POTATO_ASYNC_PRESENT 1
+#endif
+
 static std::unique_ptr<PotatoVideoDecoder> instance = nullptr;
 
-PotatoVideoDecoder::PotatoVideoDecoder(int videoFormat, int width, int height,
-                                       int redrawRate, void *context, int drFlags)
-    : VideoDecoderBase(width, height) {
-    const int perf_flags = FAST_DECODE |
-                           ((g_potato.experimental_stable_stream ||
-                             g_potato.experimental_ultra_potato)
-                                ? VERY_FAST_DECODE
-                                : 0);
+bool g_potato_video_2nd_core = false;
+static u32 saved_core1_limit = 0;
+
+int potato_decoder_perf_flags() {
+    return FAST_DECODE | ((g_potato.experimental_stable_stream ||
+                           g_potato.experimental_ultra_potato)
+                              ? VERY_FAST_DECODE
+                              : 0);
+}
+
+PotatoVideoDecoder::PotatoVideoDecoder(int videoFormat, int width, int height, int redrawRate, void *context, int drFlags)
+    : VideoDecoderBase(width, height, redrawRate) {
+    int perf_flags = potato_decoder_perf_flags();
+    
+    if (g_potato_video_2nd_core) {
+        // core 1 runs at most this share of the time for the app, the slices sent there need much more
+        saved_core1_limit = 0;
+        APT_GetAppCpuTimeLimit(&saved_core1_limit);
+        const Result res = APT_SetAppCpuTimeLimit(80);
+        printf("[POTATO] video on core 1, time limit 80%%: %s\n",
+               R_SUCCEEDED(res) ? "ok" : "refused");
+        perf_flags |= SLICE_CORE1;
+    }
 
     printf("[POTATO] SoftDecoder init %dx%d @ %d fps\n", width, height, redrawRate);
 
@@ -42,107 +57,136 @@ PotatoVideoDecoder::PotatoVideoDecoder(int videoFormat, int width, int height,
     ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size,
                     INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
 
-    // Y2RU : hardware YUV->RGB 
-    if (y2rInit()) {
-        fprintf(stderr, "[POTATO] y2rInit failed\n");
-        throw std::runtime_error("y2rInit failed");
-    }
+    // Y2RU: hardware YUV->RGB
+    y2r = std::make_unique<Y2rConverter>(image_width, image_height,
+                                         texture_width, texture_height,
+                                         pixel_size);
 
-    Y2RU_ConversionParams y2r_params;
-    y2r_params.input_format         = INPUT_YUV420_INDIV_8;
-    y2r_params.output_format        = OUTPUT_RGB_16_565;
-    y2r_params.rotation             = ROTATION_NONE;
-    y2r_params.block_alignment      = BLOCK_LINE;
-    y2r_params.input_line_width     = image_width;
-    y2r_params.input_lines          = image_height;
-    y2r_params.standard_coefficient = COEFFICIENT_ITU_R_BT_709_SCALING;
-    y2r_params.alpha                = 0xFF;
-
-    int status = Y2RU_SetConversionParams(&y2r_params);
-    if (status) {
-        fprintf(stderr, "[POTATO] Y2RU_SetConversionParams failed: %d\n", status);
-        throw std::runtime_error("Y2RU_SetConversionParams failed");
-    }
-
-    rgb_img_buffer =
-        (u8 *)linearAlloc(texture_width * texture_height * pixel_size);
+    rgb_img_buffer = (u8 *)linearAlloc(texture_width * texture_height * pixel_size);
     if (!rgb_img_buffer) {
         fprintf(stderr, "[POTATO] Out of memory for rgb_img_buffer\n");
         throw std::runtime_error("Out of memory");
     }
 
-    printf("[POTATO] init OK — Y2RU ready, buf=%dKB\n",
+    LightEvent_Init(&job_ready, RESET_ONESHOT);
+    LightEvent_Init(&presenter_idle, RESET_STICKY);
+    LightEvent_Signal(&presenter_idle);
+
+    // same priority as main, the decoder drops one step on its first frame.
+    svcGetThreadPriority(&presenter_priority, CUR_THREAD_HANDLE);
+    if (presenter_priority >= 0x3F) {
+        presenter_priority = 0x3E;
+    }
+    if (POTATO_ASYNC_PRESENT) {
+        presenter = threadCreate(_presenter_entry, this, 0x10000,
+                                 presenter_priority, -1, false);
+    }
+    async_present = presenter != nullptr;
+
+    potato_bench_record_start(videoFormat, width, height, redrawRate);
+
+    printf("[POTATO] init OK — Y2RU ready (%s, %s), buf=%dKB\n",
+           y2r->can_tile() ? "tiled" : "linear",
+           presenter ? "async" : "sync",
            (texture_width * texture_height * pixel_size) / 1024);
 }
 
 PotatoVideoDecoder::~PotatoVideoDecoder() {
+    printf("[POTATO] stopping decoder\n");
+    if (presenter) {
+        presenter_stop = true;
+        LightEvent_Signal(&job_ready);
+        while (threadJoin(presenter, 1000000000ULL) != 0) {
+            printf("[POTATO] waiting for the presenter to stop\n");
+        }
+        threadFree(presenter);
+        presenter = nullptr;
+    }
+    potato_bench_record_stop();
     ffmpeg_destroy();
-    y2rExit();
+    if (saved_core1_limit != 0) {
+        APT_SetAppCpuTimeLimit(saved_core1_limit);
+        saved_core1_limit = 0;
+    }
+    y2r = nullptr;
     linearFree(rgb_img_buffer);
     potato_print_stats();
     printf("[POTATO] decoder shutdown\n");
 }
 
-int PotatoVideoDecoder::_write_yuv_to_framebuffer(const u8 **source,
-                                                   const int *strides,
-                                                   int width, int height,
-                                                   int px_size) {
-    Handle conv_event;
-    int status = 0;
+void PotatoVideoDecoder::_presenter_entry(void *arg) {
+    static_cast<PotatoVideoDecoder *>(arg)->_presenter_loop();
+}
+
+void PotatoVideoDecoder::_presenter_loop() {
+    for (;;) {
+        LightEvent_Wait(&job_ready);
+        if (presenter_stop) {
+            break;
+        }
+        _present_frame(job);
+        LightEvent_Signal(&presenter_idle);
+    }
+}
+
+void PotatoVideoDecoder::_lower_decoder_priority() {
+    decoder_priority_checked = true;
+    s32 priority = 0x30;
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    if (priority > presenter_priority) {
+        return;
+    }
+    if (R_FAILED(svcSetThreadPriority(CUR_THREAD_HANDLE,
+                                      presenter_priority + 1))) {
+        async_present = false;
+        printf("[POTATO] decoder priority unchanged, presenting in sync\n");
+    }
+}
+
+void PotatoVideoDecoder::_wait_presenter_idle() {
+    if (!async_present) {
+        return;
+    }
+    // timeout so a stuck presenter shows up instead of a silent freeze
+    while (LightEvent_WaitTimeout(&presenter_idle, 1000000000LL)) {
+        printf("[POTATO] presenter still busy after 1 s\n");
+    }
+}
+
+void PotatoVideoDecoder::_queue_present(u8 *const *planes,
+                                        const int *strides) {
+    PresentJob frame;
+    for (int i = 0; i < 3; i++) {
+        frame.planes[i] = planes[i];
+        frame.strides[i] = strides[i];
+    }
+
+    if (!async_present) {
+        _present_frame(frame);
+        return;
+    }
+
+    // caller already waited for the presenter
+    job = frame;
+    LightEvent_Clear(&presenter_idle);
+    LightEvent_Signal(&job_ready);
+}
+
+void PotatoVideoDecoder::_present_frame(const PresentJob &frame) {
     u64 t_start = svcGetSystemTick();
 
-    const int luma_gap = strides[0] - width;
-    const int chroma_u_gap = strides[1] - width / 2;
-    const int chroma_v_gap = strides[2] - width / 2;
-    if (luma_gap < 0 || chroma_u_gap < 0 || chroma_v_gap < 0) {
-        potato_frame_skipped();
-        return DR_OK;
-    }
-
-    status = Y2RU_SetSendingY(source[0], width * height, width, luma_gap);
-    if (status) { fprintf(stderr, "[POTATO] Y2RU_SetSendingY failed\n"); goto fail; }
-
-    status = Y2RU_SetSendingU(source[1], width * height / 4, width / 2, chroma_u_gap);
-    if (status) { fprintf(stderr, "[POTATO] Y2RU_SetSendingU failed\n"); goto fail; }
-
-    status = Y2RU_SetSendingV(source[2], width * height / 4, width / 2, chroma_v_gap);
-    if (status) { fprintf(stderr, "[POTATO] Y2RU_SetSendingV failed\n"); goto fail; }
-
-    status = Y2RU_SetReceiving(
-        rgb_img_buffer,
-        texture_width * texture_height * px_size,
-        width * px_size,
-        (texture_width - width) * px_size);
-    if (status) { fprintf(stderr, "[POTATO] Y2RU_SetReceiving failed\n"); goto fail; }
-
-    status = Y2RU_StartConversion();
-    if (status) { fprintf(stderr, "[POTATO] Y2RU_StartConversion failed\n"); goto fail; }
-
-    status = Y2RU_GetTransferEndEvent(&conv_event);
-    if (status) {
-        fprintf(stderr, "[POTATO] Y2RU_GetTransferEndEvent failed\n");
-        Y2RU_StopConversion();
-        goto fail;
-    }
-
-    status = svcWaitSynchronization(conv_event, 10000000);
-    svcCloseHandle(conv_event);
-    if (R_FAILED(status)) {
-        Y2RU_StopConversion();
-        goto fail;
-    }
-
+    // keep the lock so the renderer can't switch tiled/linear mid frame
     renderer_lock.lock();
-    renderer->set_perf_decode_ticks(svcGetSystemTick() - t_start);
-    renderer->write_px_to_framebuffer(rgb_img_buffer);
+    const bool tiled = y2r->can_tile() && renderer->accepts_tiled_source();
+    if (y2r->convert(frame.planes, frame.strides, rgb_img_buffer, tiled)) {
+        renderer->set_perf_decode_ticks(svcGetSystemTick() - t_start);
+        if (tiled) {
+            renderer->write_tiled_px_to_framebuffer(rgb_img_buffer);
+        } else {
+            renderer->write_px_to_framebuffer(rgb_img_buffer);
+        }
+    }
     renderer_lock.unlock();
-
-    potato_frame_decoded();
-    return DR_OK;
-
-fail:
-    potato_frame_skipped();
-    return DR_OK;
 }
 
 void PotatoVideoDecoder::_record_frame_cost(u64 frame_start_ticks) {
@@ -167,6 +211,12 @@ void PotatoVideoDecoder::_record_frame_cost(u64 frame_start_ticks) {
 }
 
 int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
+    if (async_present && !decoder_priority_checked) {
+        _lower_decoder_priority();
+    }
+    if (_stream_fell_behind(decodeUnit)) {
+        return DR_NEED_IDR;
+    }
     const bool present_frame = !potato_should_skip_frame();
 
     const u64 frame_start_ticks = svcGetSystemTick();
@@ -181,12 +231,16 @@ int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
         length += entry->length;
         entry = entry->next;
     }
+    potato_bench_record_frame(ffmpeg_buffer, length);
 
     if (ffmpeg_decode((unsigned char *)ffmpeg_buffer, length) < 0) {
         _record_frame_cost(frame_start_ticks);
         potato_frame_skipped();
         return DR_NEED_IDR;
     }
+
+    // ffmpeg_get_frame() frees the previous frame, Y2R may still be reading it (rarely waits)
+    _wait_presenter_idle();
 
     AVFrame *frame = ffmpeg_get_frame(false);
     if (!frame) {
@@ -197,15 +251,16 @@ int PotatoVideoDecoder::submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
     if (!present_frame) {
         _record_frame_cost(frame_start_ticks);
+        _record_frame_stats(decodeUnit);
         potato_frame_skipped();
         return DR_OK;
     }
 
-    const int result =
-        _write_yuv_to_framebuffer((const u8 **)frame->data, frame->linesize,
-                                  image_width, image_height, pixel_size);
+    _queue_present(frame->data, frame->linesize);
+    potato_frame_decoded();
     _record_frame_cost(frame_start_ticks);
-    return result;
+    _record_frame_stats(decodeUnit);
+    return DR_OK;
 }
 
 static int potato_setup(int videoFormat, int width, int height, int redrawRate,
@@ -231,6 +286,5 @@ DECODER_RENDERER_CALLBACKS decoder_callbacks_potato = {
     .setup            = potato_setup,
     .cleanup          = potato_cleanup,
     .submitDecodeUnit = potato_submit,
-    .capabilities     = CAPABILITY_DIRECT_SUBMIT |
-                        CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC,
+    .capabilities     = CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC,
 };

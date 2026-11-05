@@ -23,6 +23,8 @@
 
 // Enable multi-threaded decoding
 #define SLICE_THREADING 0x4
+#define SLICE_CORE1 0x8
+
 // Uses hardware acceleration
 #define VDPAU_ACCELERATION 0x40
 #define VAAPI_ACCELERATION 0x80

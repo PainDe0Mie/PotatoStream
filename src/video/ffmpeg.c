@@ -42,12 +42,88 @@ static int current_frame, next_frame;
 
 enum decoders ffmpeg_decoder;
 
+#ifdef __3DS__
+#include <3ds.h>
+
+// FFmpeg hands the slices of a frame to avctx->execute
+static struct {
+  Thread thread;
+  LightSemaphore start, done;
+  volatile bool quit;
+  AVCodecContext *ctx;
+  int (*func)(AVCodecContext *, void *);
+  char *arg;
+  int *ret;
+  int count, size;
+  int next;
+} core1;
+
+static void core1_run_jobs(void) {
+  int i;
+  while ((i = __atomic_fetch_add(&core1.next, 1, __ATOMIC_ACQ_REL)) < core1.count) {
+    int r = core1.func(core1.ctx, core1.arg + (size_t)i * core1.size);
+    if (core1.ret)
+      core1.ret[i] = r;
+  }
+}
+
+static void core1_entry(void *unused) {
+  (void)unused;
+  for (;;) {
+    LightSemaphore_Acquire(&core1.start, 1);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (core1.quit)
+      break;
+    core1_run_jobs();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    LightSemaphore_Release(&core1.done, 1);
+  }
+}
+
+static int core1_execute(AVCodecContext *c, int (*func)(AVCodecContext *c2, void *arg2),
+                         void *arg, int *ret, int count, int size) {
+  core1.ctx = c;
+  core1.func = func;
+  core1.arg = arg;
+  core1.ret = ret;
+  core1.count = count;
+  core1.size = size;
+  __atomic_store_n(&core1.next, 0, __ATOMIC_SEQ_CST);
+  LightSemaphore_Release(&core1.start, 1);
+  core1_run_jobs();
+  LightSemaphore_Acquire(&core1.done, 1);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  return 0;
+}
+
+static bool core1_start(void) {
+  s32 priority = 0x30;
+  svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+  LightSemaphore_Init(&core1.start, 0, 1);
+  LightSemaphore_Init(&core1.done, 0, 1);
+  core1.quit = false;
+  // below the caller, so audio decoding on core 1 keeps the priority
+  core1.thread = threadCreate(core1_entry, NULL, 0x40000,
+                              priority < 0x3F ? priority + 1 : priority, 1, false);
+  return core1.thread != NULL;
+}
+
+static void core1_stop(void) {
+  if (core1.thread == NULL)
+    return;
+  core1.quit = true;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  LightSemaphore_Release(&core1.start, 1);
+  threadJoin(core1.thread, U64_MAX);
+  threadFree(core1.thread);
+  core1.thread = NULL;
+}
+#endif
+
 #define BYTES_PER_PIXEL 4
 
-// This function must be called before
-// any other decoding functions
+// This function must be called before any other decoding functions
 int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer_count, int thread_count) {
-  // Initialize the avcodec library and register codecs
   av_log_set_level(AV_LOG_QUIET);
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58,10,100)
   avcodec_register_all();
@@ -64,31 +140,31 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   for (int try = 0; try < 6; try++) {
     if (videoFormat & VIDEO_FORMAT_MASK_H264) {
       if (ffmpeg_decoder == SOFTWARE) {
-        if (try == 0) decoder = avcodec_find_decoder_by_name("h264_nvv4l2"); // Tegra
-        if (try == 1) decoder = avcodec_find_decoder_by_name("h264_nvmpi"); // Tegra
-        if (try == 2) decoder = avcodec_find_decoder_by_name("h264_omx"); // VisionFive
-        if (try == 3) decoder = avcodec_find_decoder_by_name("h264_v4l2m2m"); // Stateful V4L2
+        if (try == 0) decoder = avcodec_find_decoder_by_name("h264_nvv4l2");   // Tegra
+        if (try == 1) decoder = avcodec_find_decoder_by_name("h264_nvmpi");    // Tegra
+        if (try == 2) decoder = avcodec_find_decoder_by_name("h264_omx");      // VisionFive
+        if (try == 3) decoder = avcodec_find_decoder_by_name("h264_v4l2m2m");  // Stateful V4L2
       }
-      if (try == 4) decoder = avcodec_find_decoder_by_name("h264"); // Software and hwaccel
+      if (try == 4) decoder = avcodec_find_decoder_by_name("h264");            // Software and hwaccel
     } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
       if (ffmpeg_decoder == SOFTWARE) {
-        if (try == 0) decoder = avcodec_find_decoder_by_name("hevc_nvv4l2"); // Tegra
-        if (try == 1) decoder = avcodec_find_decoder_by_name("hevc_nvmpi"); // Tegra
-        if (try == 2) decoder = avcodec_find_decoder_by_name("hevc_omx"); // VisionFive
-        if (try == 3) decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m"); // Stateful V4L2
+        if (try == 0) decoder = avcodec_find_decoder_by_name("hevc_nvv4l2");   // Tegra
+        if (try == 1) decoder = avcodec_find_decoder_by_name("hevc_nvmpi");    // Tegra
+        if (try == 2) decoder = avcodec_find_decoder_by_name("hevc_omx");      // VisionFive
+        if (try == 3) decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m");  // Stateful V4L2
       }
-      if (try == 4) decoder = avcodec_find_decoder_by_name("hevc"); // Software and hwaccel
+      if (try == 4) decoder = avcodec_find_decoder_by_name("hevc");            // Software and hwaccel
     } else if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
       if (ffmpeg_decoder == SOFTWARE) {
         if (try == 0) decoder = avcodec_find_decoder_by_name("libdav1d");
       }
-      if (try == 1) decoder = avcodec_find_decoder_by_name("av1"); // Hwaccel
+      if (try == 1) decoder = avcodec_find_decoder_by_name("av1");             // Hwaccel
     } else {
       printf("Video format not supported\n");
       return -1;
     }
 
-    // Skip this decoder if it isn't compiled into FFmpeg
+    // skip if it isn't compiled into FFmpeg
     if (!decoder) {
       continue;
     }
@@ -99,10 +175,9 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
       return -1;
     }
 
-    // Use low delay decoding
+    // low delay decoding
     decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
-    // Allow display of corrupt frames and frames missing references
     decoder_ctx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
     decoder_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
 
@@ -116,10 +191,13 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
       decoder_ctx->skip_frame = AVDISCARD_NONREF;
     }
 
-    // Report decoding errors to allow us to request a key frame
+    // report decoding errors
     decoder_ctx->err_recognition = AV_EF_EXPLODE;
 
-    if (perf_lvl & SLICE_THREADING) {
+    if (perf_lvl & SLICE_CORE1) {
+      decoder_ctx->thread_type = FF_THREAD_SLICE;
+      decoder_ctx->thread_count = 2;
+    } else if (perf_lvl & SLICE_THREADING) {
       decoder_ctx->thread_type = FF_THREAD_SLICE;
       decoder_ctx->thread_count = thread_count;
     } else {
@@ -147,6 +225,15 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
 
   printf("Using FFmpeg decoder: %s\n", decoder->name);
 
+#ifdef __3DS__
+  if ((perf_lvl & SLICE_CORE1) && decoder_ctx->active_thread_type == FF_THREAD_SLICE) {
+    if (core1_start())
+      decoder_ctx->execute = core1_execute;
+    else
+      printf("Core 1 unavailable, slices stay on one core\n");
+  }
+#endif
+
   dec_frames_cnt = buffer_count;
   dec_frames = malloc(buffer_count * sizeof(AVFrame*));
   if (dec_frames == NULL) {
@@ -170,19 +257,24 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   return 0;
 }
 
-// This function must be called after
-// decoding is finished
+// This function must be called after decoding is finished
 void ffmpeg_destroy(void) {
   av_packet_free(&pkt);
   if (decoder_ctx) {
     avcodec_free_context(&decoder_ctx);
   }
+#ifdef __3DS__
+  core1_stop();
+#endif
   if (dec_frames) {
     for (int i = 0; i < dec_frames_cnt; i++) {
       if (dec_frames[i])
         av_frame_free(&dec_frames[i]);
     }
+    free(dec_frames);
+    dec_frames = NULL;
   }
+  current_frame = next_frame = 0;
 }
 
 AVFrame* ffmpeg_get_frame(bool native_frame) {
@@ -201,8 +293,7 @@ AVFrame* ffmpeg_get_frame(bool native_frame) {
   return NULL;
 }
 
-// packets must be decoded in order
-// indata must be inlen + AV_INPUT_BUFFER_PADDING_SIZE in length
+// packets must be decoded in order indata must be inlen + AV_INPUT_BUFFER_PADDING_SIZE in length
 int ffmpeg_decode(unsigned char* indata, int inlen) {
   int err;
 
