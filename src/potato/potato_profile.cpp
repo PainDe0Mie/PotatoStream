@@ -10,6 +10,21 @@ PotatoProfile g_potato = {0};
 #define TICKS_PER_SEC_O3DS 268000000ULL
 #define FRAME_BUDGET(fps) (TICKS_PER_SEC_O3DS / (fps))
 
+const char *potato_profile_name(int profile) {
+    switch (profile) {
+    case POTATO_PROFILE_BETTER_SCREEN:
+        return "Better screen";
+    case POTATO_PROFILE_SMOOTH:
+        return "Smooth 30 fps";
+    case POTATO_PROFILE_STABLE:
+        return "Stable";
+    case POTATO_PROFILE_ULTRA:
+        return "Ultra potato";
+    default:
+        return "Default";
+    }
+}
+
 static void potato_resolve_profile(CONFIGURATION *cfg) {
     if (cfg == NULL) {
         return;
@@ -21,6 +36,7 @@ static void potato_resolve_profile(CONFIGURATION *cfg) {
     g_potato.experimental_ultra_potato = cfg->experimental_ultra_potato;
     g_potato.experimental_stereoscopic_3d =
         cfg->experimental_stereoscopic_3d;
+    g_potato.smooth = cfg->potato_profile == POTATO_PROFILE_SMOOTH;
     g_potato.render_crop_to_fit = g_potato.experimental_better_screen;
     g_potato.render_linear_filter =
         g_potato.experimental_better_screen &&
@@ -49,6 +65,11 @@ static void potato_resolve_profile(CONFIGURATION *cfg) {
         g_potato.height = POTATO_BETTER_HEIGHT;
         g_potato.fps = POTATO_BETTER_FPS;
         g_potato.bitrate_kbps = POTATO_BETTER_BITRATE_KBPS;
+    } else if (g_potato.smooth) {
+        g_potato.width = POTATO_WIDTH;
+        g_potato.height = POTATO_HEIGHT;
+        g_potato.fps = POTATO_SMOOTH_FPS;
+        g_potato.bitrate_kbps = POTATO_SMOOTH_BITRATE_KBPS;
     } else {
         g_potato.width = POTATO_WIDTH;
         g_potato.height = POTATO_HEIGHT;
@@ -104,7 +125,6 @@ bool potato_init(void) {
     }
 
     if (!g_potato.is_potato) {
-        // Determine a human-readable model name for New 3DS variants.
         const char *n3ds_model_name = "New 3DS";
         switch (g_potato.model) {
         case CFG_MODEL_N3DS:   n3ds_model_name = "New 3DS";       break;
@@ -114,7 +134,7 @@ bool potato_init(void) {
         }
 
         // New 3DS values, audio and UI read them even if is_potato is false
-        g_potato.hw_decode = true;           // MVD hardware decoder available
+        g_potato.hw_decode = true;            // MVD hardware decoder available
         g_potato.frame_skip_enabled = false;  // No frame-skip needed
         g_potato.audio_buf_ms = 20;           // Low-latency: 20 ms (vs 60 ms O3DS)
         g_potato.packet_size = 1392;          // Larger packets for faster cores
@@ -295,8 +315,8 @@ void potato_apply_config(void *moonlight_config) {
     cfg->video_decoder = VIDEO_DECODER_TYPE::SOFTWARE_VIDEO_DECODER;
     cfg->localaudio = g_potato.host_audio;
 
-    // locked values come from the profile, the others are copied back so the
-    // renderer sees the real stream size
+    // locked values come from the profile, the others are copied back so the renderer sees the real stream size
+
     if (cfg->auto_width) {
         cfg->stream.width = g_potato.width;
     } else {

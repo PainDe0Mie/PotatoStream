@@ -8,8 +8,7 @@
 extern "C" {
 #endif
 
-// sizes are multiples of 16 (H.264 macroblocks) and 5:3 like the top screen,
-// fps divide 60 to avoid judder
+// sizes are multiples of 16 (H.264 macroblocks) and 5:3 like the top screen, fps divide 60 to avoid judder
 #define POTATO_WIDTH 320
 #define POTATO_HEIGHT 192
 #define POTATO_FPS 20
@@ -18,6 +17,10 @@ extern "C" {
 #define POTATO_BETTER_HEIGHT 240
 #define POTATO_BETTER_FPS 15
 #define POTATO_BETTER_BITRATE_KBPS 2200
+
+// Smooth: same size as the default, 30 fps (fits now that a 320x192 frame decodes in ~14 ms on an Old 2DS)
+#define POTATO_SMOOTH_FPS 30
+#define POTATO_SMOOTH_BITRATE_KBPS 1600
 #define POTATO_STABLE_FPS 15
 #define POTATO_STABLE_BITRATE_KBPS 1100
 #define POTATO_STABLE_BETTER_BITRATE_KBPS 1600
@@ -32,6 +35,7 @@ extern "C" {
 #define POTATO_AUDIO_BUF_MS 60
 #define POTATO_FRAME_SKIP 2
 #define POTATO_STABLE_FRAME_SKIP 6
+
 // same as New 3DS: bigger packets = fewer poll/recvfrom calls (~26% less than 1024)
 #define POTATO_PACKET_SIZE 1392
 #define POTATO_STABLE_PACKET_SIZE 1392
@@ -39,6 +43,18 @@ extern "C" {
 #define POTATO_STEREO_FRAME_SKIP 8
 #define POTATO_ULTRA_PACKET_SIZE 1392
 #define POTATO_PRESENT_SKIP_CAP 2
+
+// the stream profile picked in the settings
+enum PotatoProfileChoice {
+    POTATO_PROFILE_DEFAULT = 0,
+    POTATO_PROFILE_BETTER_SCREEN = 1,
+    POTATO_PROFILE_SMOOTH = 2,
+    POTATO_PROFILE_STABLE = 3,
+    POTATO_PROFILE_ULTRA = 4,
+    POTATO_PROFILE_COUNT
+};
+
+const char *potato_profile_name(int profile);
 
 typedef struct {
     bool is_potato;
@@ -53,6 +69,7 @@ typedef struct {
     bool experimental_stable_stream;
     bool experimental_ultra_potato;
     bool experimental_stereoscopic_3d;
+    bool smooth;
     bool dynamic_ultra_active;
     bool render_crop_to_fit;
     bool render_linear_filter;
