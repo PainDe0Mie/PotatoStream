@@ -259,6 +259,8 @@ static void clear_server_xml_fields(PSERVER_DATA server) {
   server->serverInfo.rtspSessionUrl = NULL;
   xml_free_modelist(server->modes);
   server->modes = NULL;
+  free(server->mac);
+  server->mac = NULL;
 }
 
 static int load_serverinfo(PSERVER_DATA server, bool https) {
@@ -334,6 +336,10 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
 
   if (xml_modelist(data->memory, data->size, &server->modes) != GS_OK)
     server->modes = NULL;
+
+  // optional: Sunshine only sends the real address to paired clients
+  if (xml_search(data->memory, data->size, "mac", &server->mac) != GS_OK)
+    server->mac = NULL;
 
   // These fields are present on all version of GFE that this client supports
   if (!strlen(currentGameText) || !strlen(pairedText) || !strlen(server->serverInfo.serverInfoAppVersion) || !strlen(stateText))
