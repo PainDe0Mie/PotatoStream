@@ -24,7 +24,7 @@ The Old 3DS / 2DS has **no** H.264 hardware decoder (MVD is New 3DS only). The o
 PotatoStream changes that:
 
 - **Automatic hardware detection**: Potato mode activates automatically on Old 3DS/2DS | New 3DS keeps using the MVD hardware decoder as usual
-- **Adapted stream config**: 400×240 @ 24fps, 3 Mbps -> matched to the actual capabilities of the ARM11 @ 268MHz
+- **Adapted stream config**: 320×192 @ 20 fps, 3 Mbps -> matched to the actual capabilities of the ARM11 @ 268MHz
 - **Y2RU pipeline**: uses the hardware YUV→RGB converter available on *all* 3DS models for frame conversion
 - **Smart frame skip**: if the CPU falls behind its frame budget, packets are cleanly dropped instead of letting latency accumulate
 - **Correct ARM11 compiler flags**: `-march=armv6k -mfpu=vfp -mfloat-abi=hard` - no NEON (not available on Old 3DS), no emulated float
